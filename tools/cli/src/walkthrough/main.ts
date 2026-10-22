@@ -13,19 +13,23 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, extname, join } from 'node:path'
 import { setRequestedExitCode } from '../runtime-exit-code.ts'
 import { composeHtml, timeScenes } from './compose.ts'
-import { MacVoiceError, macVoiceProblem, narrateWithMacVoice } from './mac-voice.ts'
+import {
+  VoiceError,
+  type Alignment,
+  type Narration,
+  type Voice,
+  type VoiceName,
+} from './narration.ts'
 import { prepareScript, type PreparedScene } from './prepare.ts'
 import { ScriptError, parseScript, type WalkthroughScript } from './script.ts'
 import { readingAlignment } from './silent.ts'
-import { DEFAULT_VOICE_ID, TtsError, narrate, type Alignment, type Narration } from './tts.ts'
-
-type Voice = 'elevenlabs' | 'mac'
+import { chooseVoice, ignoredMessage, silentMessage } from './voices.ts'
 
 interface WalkthroughOutput {
   output: string
   narrated: boolean
   // Which voice narrated the walkthrough, or null when it is silent.
-  voice: Voice | null
+  voice: VoiceName | null
   durationSeconds: number
   bytes: number
   scenes: number
@@ -58,9 +62,9 @@ const AUDIO_ENCODING = ['-c:a', 'aac', '-b:a', '64k', '-ac', '1']
 const CONTAINER_FLAGS = ['-movflags', '+faststart']
 
 // Renders a walkthrough script to an MP4 (FLOW-390 architecture doc, "walkthrough"): narrated by
-// ElevenLabs when ELEVEN_LABS_API_KEY is set, else by the macOS voice WALKTHROUGH_MAC_VOICE names
-// (FLOW-432), else silent with the narration as subtitles (FLOW-423). Everything that can be
-// checked without voicing anything is checked before the first narration.
+// the first voice in voices.ts whose variable is set (FLOW-432, FLOW-437), else silent with the
+// narration as subtitles (FLOW-423). Everything that can be checked without voicing anything is
+// checked before the first narration.
 export const runWalkthroughRender = async (
   scriptFile: string,
   outFile: string,
@@ -68,22 +72,15 @@ export const runWalkthroughRender = async (
 ): Promise<void> => {
   const env = options.env ?? process.env
   const stdout = options.stdout ?? ((chunk: string) => void process.stdout.write(chunk))
-  const apiKey = env.ELEVEN_LABS_API_KEY || undefined
-  const macVoice = env.WALKTHROUGH_MAC_VOICE || undefined
-  const voice: Voice | undefined =
-    apiKey !== undefined ? 'elevenlabs' : macVoice !== undefined ? 'mac' : undefined
+  const choice = chooseVoice({ env, apiBase: options.apiBase })
+  const voice = choice?.voice
   const narrated = voice !== undefined
-  if (apiKey !== undefined && macVoice !== undefined) {
-    console.error(
-      'walkthrough: ELEVEN_LABS_API_KEY is set, so ElevenLabs voices the walkthrough and ' +
-        'WALKTHROUGH_MAC_VOICE is ignored.'
-    )
-  }
-  if (!narrated) {
-    console.error(
-      'walkthrough: neither ELEVEN_LABS_API_KEY nor WALKTHROUGH_MAC_VOICE is set, so the ' +
-        'walkthrough is rendered without a voice, with the narration as subtitles.'
-    )
+  if (choice === undefined) {
+    console.error(silentMessage())
+  } else {
+    for (const ignored of choice.ignored) {
+      console.error(ignoredMessage(choice.entry, ignored))
+    }
   }
   const ffmpegProblem = probeFfmpeg()
   if (ffmpegProblem !== undefined) {
@@ -91,13 +88,11 @@ export const runWalkthroughRender = async (
     setRequestedExitCode(MISSING_TOOL_EXIT)
     return
   }
-  if (voice === 'mac' && macVoice !== undefined) {
-    const problem = macVoiceProblem(macVoice)
-    if (problem !== undefined) {
-      console.error(problem.message)
-      setRequestedExitCode(problem.exitCode)
-      return
-    }
+  const voiceProblem = voice?.problem()
+  if (voiceProblem !== undefined) {
+    console.error(voiceProblem.message)
+    setRequestedExitCode(voiceProblem.exitCode)
+    return
   }
 
   const prepared = await prepareScriptFile(scriptFile)
@@ -113,12 +108,7 @@ export const runWalkthroughRender = async (
     return
   }
 
-  const narrations =
-    apiKey !== undefined
-      ? await narrateScenes(scenes, scriptFile, apiKey, env, options.apiBase)
-      : macVoice !== undefined
-        ? narrateScenesWithMacVoice(scenes, scriptFile, macVoice)
-        : []
+  const narrations = voice === undefined ? [] : await narrateScenes(voice, scenes, scriptFile)
   if (narrations === undefined) {
     setRequestedExitCode(1)
     return
@@ -172,14 +162,14 @@ export const runWalkthroughRender = async (
     const output: WalkthroughOutput = {
       output: outFile,
       narrated,
-      voice: voice ?? null,
+      voice: voice?.name ?? null,
       durationSeconds: timed.reduce((sum, { duration }) => sum + duration, 0),
       bytes,
       scenes: scenes.length,
       synthesizedScenes: narrations.filter(({ cached }) => !cached).length,
       cachedScenes: narrations.filter(({ cached }) => cached).length,
       ttsCharacters:
-        voice === 'elevenlabs'
+        voice?.billsPerCharacter === true
           ? scenes
               .filter((_, i) => narrations[i]?.cached === false)
               .reduce((sum, { narration }) => sum + narration.length, 0)
@@ -210,52 +200,20 @@ const prepareScriptFile = async (
 
 // Voices every scene, or reports why it cannot and returns undefined.
 const narrateScenes = async (
+  voice: Voice,
   scenes: PreparedScene[],
-  scriptFile: string,
-  apiKey: string,
-  env: NodeJS.ProcessEnv,
-  apiBase: string | undefined
+  scriptFile: string
 ): Promise<Narration[] | undefined> => {
-  const tts = {
-    apiKey,
-    voiceId: env.ELEVEN_LABS_VOICE_ID || DEFAULT_VOICE_ID,
-    cacheDir: cacheDirOf(scriptFile),
-    apiBase,
-  }
-
   try {
-    const narrations: Narration[] = []
-    for (const scene of scenes) {
-      narrations.push(await narrate(scene.narration, tts))
-    }
-    return narrations
-  } catch (err) {
-    if (!(err instanceof TtsError)) {
-      throw err
-    }
-    console.error(`${scriptFile}: ${err.message}`)
-    return undefined
-  }
-}
-
-// Voices every scene with a macOS voice, or reports why it cannot and returns undefined.
-const narrateScenesWithMacVoice = (
-  scenes: PreparedScene[],
-  scriptFile: string,
-  voice: string
-): Narration[] | undefined => {
-  const options = { voice, cacheDir: cacheDirOf(scriptFile) }
-
-  try {
-    return scenes.map((scene) =>
-      narrateWithMacVoice(
-        scene.narration,
-        scene.steps.map(({ cue }) => cue),
-        options
-      )
+    return await voice.narrate(
+      scenes.map((scene) => ({
+        narration: scene.narration,
+        cues: scene.steps.map(({ cue }) => cue),
+      })),
+      cacheDirOf(scriptFile)
     )
   } catch (err) {
-    if (!(err instanceof MacVoiceError)) {
+    if (!(err instanceof VoiceError)) {
       throw err
     }
 

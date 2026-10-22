@@ -1,19 +1,16 @@
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-
-// ElevenLabs' character timings, in its own field names.
-export interface Alignment {
-  characters: string[]
-  character_start_times_seconds: number[]
-  character_end_times_seconds: number[]
-}
-
-export interface Narration {
-  audioFile: string
-  alignment: Alignment
-  cached: boolean
-}
+import {
+  VoiceError,
+  isAlignment,
+  isRecord,
+  readCached,
+  type Alignment,
+  type Narration,
+  type Voice,
+  type VoiceEntry,
+} from './narration.ts'
 
 export interface TtsOptions {
   apiKey: string
@@ -26,7 +23,29 @@ export const DEFAULT_VOICE_ID = 'vT7ssnLimZ4obHUM4HyN'
 export const MODEL_ID = 'eleven_multilingual_v2'
 export const SPEED = 1.1
 
-export class TtsError extends Error {}
+export class TtsError extends VoiceError {}
+
+// ElevenLabs, turned on by ELEVEN_LABS_API_KEY. ELEVEN_LABS_VOICE_ID picks the voice.
+export const elevenLabsEntry: VoiceEntry = {
+  name: 'elevenlabs',
+  label: 'ElevenLabs',
+  variable: 'ELEVEN_LABS_API_KEY',
+  tool: 'elevenlabs',
+  use: 'ElevenLabs narration for walkthrough videos',
+  onFailure:
+    'STOP and tell the user ElevenLabs is configured but walkthrough render cannot voice the narration. Do NOT fall back.',
+  fromEnv: ({ env, apiBase }) => {
+    const apiKey = env.ELEVEN_LABS_API_KEY || undefined
+
+    return apiKey === undefined
+      ? undefined
+      : elevenLabsVoice({
+          apiKey,
+          voiceId: env.ELEVEN_LABS_VOICE_ID || DEFAULT_VOICE_ID,
+          apiBase,
+        })
+  },
+}
 
 // Speaks `text`, or reuses the cached audio for the same voice, model, speed and text.
 export const narrate = async (text: string, options: TtsOptions): Promise<Narration> => {
@@ -47,15 +66,21 @@ export const narrate = async (text: string, options: TtsOptions): Promise<Narrat
   return { audioFile, alignment, cached: false }
 }
 
-export const readCached = (entryFile: string, audioFile: string): Alignment | undefined => {
-  try {
-    const entry: unknown = JSON.parse(readFileSync(entryFile, 'utf-8'))
-    const alignment = isRecord(entry) ? entry.alignment : undefined
-    return isAlignment(alignment) && existsSync(audioFile) ? alignment : undefined
-  } catch {
-    return undefined
-  }
-}
+// Voices the scenes one at a time; the cues don't matter, since ElevenLabs times every character.
+const elevenLabsVoice = (options: Omit<TtsOptions, 'cacheDir'>): Voice => ({
+  name: 'elevenlabs',
+  billsPerCharacter: true,
+  problem: () => undefined,
+  narrate: async (scenes, cacheDir) => {
+    const narrations: Narration[] = []
+
+    for (const { narration } of scenes) {
+      narrations.push(await narrate(narration, { ...options, cacheDir }))
+    }
+
+    return narrations
+  },
+})
 
 const synthesize = async (
   text: string,
@@ -112,15 +137,3 @@ const readJson = async (response: Response): Promise<unknown> => {
     throw new TtsError('ElevenLabs returned a reply that is not JSON')
   }
 }
-
-const isAlignment = (value: unknown): value is Alignment =>
-  isRecord(value) &&
-  isArrayOf(value.characters, 'string') &&
-  isArrayOf(value.character_start_times_seconds, 'number') &&
-  isArrayOf(value.character_end_times_seconds, 'number')
-
-const isArrayOf = (value: unknown, type: 'string' | 'number'): boolean =>
-  Array.isArray(value) && value.every((item) => typeof item === type)
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === 'object' && value !== null && !Array.isArray(value)

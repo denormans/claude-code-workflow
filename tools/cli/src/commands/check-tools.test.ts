@@ -135,3 +135,72 @@ test('CLI: check-tools reports mac-voice configured when WALKTHROUGH_MAC_VOICE i
     }) + '\n'
   )
 })
+
+test('CLI: check-tools reports kokoro-voice configured when WALKTHROUGH_KOKORO_VOICE is set, and unconfigured when empty', () => {
+  const checkKokoro = (voice: string) =>
+    spawnSync(
+      process.execPath,
+      ['--experimental-transform-types', mainTsPath, 'check-tools', '--require', 'kokoro-voice'],
+      {
+        encoding: 'utf8',
+        timeout: 60_000,
+        env: { PATH: process.env.PATH, WALKTHROUGH_KOKORO_VOICE: voice },
+      }
+    )
+  const kokoroUse = 'A local Kokoro voice narrating walkthrough videos'
+  const kokoroOnFailure =
+    'STOP and tell the user a Kokoro voice is configured but walkthrough render cannot voice the narration with it. Do NOT fall back.'
+
+  const configured = checkKokoro('af_heart')
+  assert.equal(configured.status, 0)
+  assert.equal(
+    stderrBeyondNodeWarnings(configured.stderr),
+    '✓ kokoro-voice: configured — A local Kokoro voice narrating walkthrough videos'
+  )
+  assert.equal(
+    configured.stdout,
+    JSON.stringify({
+      results: [
+        {
+          tool: 'kokoro-voice',
+          state: 'configured',
+          use: kokoroUse,
+          onFailure: kokoroOnFailure,
+          env: {
+            present: ['WALKTHROUGH_KOKORO_VOICE'],
+            missing: [],
+            accepted: ['WALKTHROUGH_KOKORO_VOICE'],
+          },
+        },
+      ],
+      anyFailed: false,
+    }) + '\n'
+  )
+
+  const unconfigured = checkKokoro('')
+  assert.equal(unconfigured.status, 0)
+  assert.equal(
+    stderrBeyondNodeWarnings(unconfigured.stderr),
+    '· kokoro-voice: unconfigured — env vars not set: WALKTHROUGH_KOKORO_VOICE'
+  )
+  assert.equal(
+    unconfigured.stdout,
+    JSON.stringify({
+      results: [
+        {
+          tool: 'kokoro-voice',
+          state: 'unconfigured',
+          use: kokoroUse,
+          onFailure: kokoroOnFailure,
+          env: {
+            present: [],
+            missing: ['WALKTHROUGH_KOKORO_VOICE'],
+            accepted: ['WALKTHROUGH_KOKORO_VOICE'],
+          },
+          reason: 'env vars not set: WALKTHROUGH_KOKORO_VOICE',
+        },
+      ],
+      anyFailed: false,
+    }) + '\n'
+  )
+})

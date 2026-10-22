@@ -1,9 +1,20 @@
-import { spawnSync, type SpawnSyncReturns } from 'node:child_process'
+import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { readCached, type Alignment, type Narration } from './tts.ts'
+import {
+  VoiceError,
+  alignmentOf,
+  failureOf,
+  isMissing,
+  readCached,
+  type CuePoint,
+  type Narration,
+  type Voice,
+  type VoiceEntry,
+  type VoiceProblem,
+} from './narration.ts'
 
 // Narration with a macOS voice (FLOW-432). `say` reports no timings, so each cue's time is how long
 // the voice takes to say the narration up to it, and the characters between two such points are
@@ -14,26 +25,30 @@ export interface MacVoiceOptions {
   cacheDir: string
 }
 
-export interface CuePoint {
-  // Code points into the narration.
-  index: number
-  // Seconds from the start of the narration.
-  at: number
-}
-
-export interface MacVoiceProblem {
-  message: string
-  exitCode: number
-}
-
-export class MacVoiceError extends Error {}
+export class MacVoiceError extends VoiceError {}
 
 const MISSING_TOOL_EXIT = 2
 const AAC = ['--file-format=m4af', '--data-format=aac']
 
+// A macOS voice, turned on by WALKTHROUGH_MAC_VOICE, which names it as `say -v '?'` lists it.
+export const macVoiceEntry: VoiceEntry = {
+  name: 'mac',
+  label: 'a macOS voice',
+  variable: 'WALKTHROUGH_MAC_VOICE',
+  tool: 'mac-voice',
+  use: 'A macOS voice narrating walkthrough videos',
+  onFailure:
+    'STOP and tell the user a macOS voice is configured but walkthrough render cannot voice the narration with it. Do NOT fall back.',
+  fromEnv: ({ env }) => {
+    const voice = env.WALKTHROUGH_MAC_VOICE || undefined
+
+    return voice === undefined ? undefined : macVoice(voice)
+  },
+}
+
 // Why the voice cannot be used, or undefined when it can. Checked before any work, because `say`
 // given a voice it does not have speaks with the system voice instead and exits 0.
-export const macVoiceProblem = (voice: string): MacVoiceProblem | undefined => {
+export const macVoiceProblem = (voice: string): VoiceProblem | undefined => {
   const listing = spawnSync('say', ['-v', '?'], {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'ignore'],
@@ -112,30 +127,13 @@ export const voicesOf = (listing: string): string[] =>
     return name === undefined ? [] : [name]
   })
 
-// An alignment in ElevenLabs' shape that passes through every cue point and ends at `duration`,
-// with the characters between two points spread evenly over the time between them.
-export const alignmentOf = (text: string, points: CuePoint[], duration: number): Alignment => {
-  const characters = [...text]
-  const starts: number[] = []
-  const ends: number[] = []
-  let from: CuePoint = { index: 0, at: 0 }
-
-  for (const point of [...points, { index: characters.length, at: duration }]) {
-    // A prefix can take longer to say than a later one, or than the whole narration; time never
-    // runs backwards.
-    const at = Math.min(Math.max(point.at, from.at), duration)
-    const step = (at - from.at) / Math.max(point.index - from.index, 1)
-
-    for (let i = from.index; i < point.index; i++) {
-      starts.push(from.at + (i - from.index) * step)
-      ends.push(from.at + (i - from.index + 1) * step)
-    }
-
-    from = { index: point.index, at }
-  }
-
-  return { characters, character_start_times_seconds: starts, character_end_times_seconds: ends }
-}
+const macVoice = (voice: string): Voice => ({
+  name: 'mac',
+  billsPerCharacter: false,
+  problem: () => macVoiceProblem(voice),
+  narrate: async (scenes, cacheDir) =>
+    scenes.map(({ narration, cues }) => narrateWithMacVoice(narration, cues, { voice, cacheDir })),
+})
 
 // Where each cue starts, in code points, and how long the voice takes to reach it.
 const cuePoints = (text: string, cues: string[], voice: string): CuePoint[] => {
@@ -207,26 +205,4 @@ const durationOf = (file: string): number => {
   }
 
   return duration
-}
-
-const isMissing = (result: SpawnSyncReturns<unknown>): boolean =>
-  result.error !== undefined && 'code' in result.error && result.error.code === 'ENOENT'
-
-// Why a command that was found did not succeed, or undefined when it did.
-const failureOf = (command: string, result: SpawnSyncReturns<unknown>): string | undefined => {
-  if (result.error !== undefined) {
-    const code = 'code' in result.error ? result.error.code : undefined
-
-    return `${command} could not be run (${String(code ?? result.error.message)}).`
-  }
-
-  if (result.signal !== null) {
-    return `${command} was killed by ${result.signal}.`
-  }
-
-  if (result.status !== 0) {
-    return `${command} exited with status ${result.status}.`
-  }
-
-  return undefined
 }

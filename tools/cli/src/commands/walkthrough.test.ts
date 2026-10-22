@@ -8,6 +8,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { getRequestedExitCode, setRequestedExitCode } from '../runtime-exit-code.ts'
+import { writeKokoroStubs } from '../testing/kokoro-stubs.ts'
 import { stderrBeyondNodeWarnings } from '../testing/subprocess-stderr.ts'
 import { SCENE_TAIL } from '../walkthrough/compose.ts'
 import { runWalkthroughRender } from '../walkthrough/main.ts'
@@ -369,8 +370,7 @@ test('walkthrough render: with no ElevenLabs key it renders silent, subtitled an
         stderr.mock.calls.map((call) => call.arguments),
         [
           [
-            'walkthrough: neither ELEVEN_LABS_API_KEY nor WALKTHROUGH_MAC_VOICE is set, so the ' +
-              'walkthrough is rendered without a voice, with the narration as subtitles.',
+            'walkthrough: none of ELEVEN_LABS_API_KEY, WALKTHROUGH_MAC_VOICE or WALKTHROUGH_KOKORO_VOICE is set, so the walkthrough is rendered without a voice, with the narration as subtitles.',
           ],
         ]
       )
@@ -429,8 +429,7 @@ test('CLI: walkthrough render with no ElevenLabs key exits 0 and prints the sile
       assert.equal(result.status, 0)
       assert.equal(
         stderrBeyondNodeWarnings(result.stderr),
-        'walkthrough: neither ELEVEN_LABS_API_KEY nor WALKTHROUGH_MAC_VOICE is set, so the ' +
-          'walkthrough is rendered without a voice, with the narration as subtitles.'
+        'walkthrough: none of ELEVEN_LABS_API_KEY, WALKTHROUGH_MAC_VOICE or WALKTHROUGH_KOKORO_VOICE is set, so the walkthrough is rendered without a voice, with the narration as subtitles.'
       )
       assert.equal(
         result.stdout,
@@ -636,6 +635,221 @@ test('walkthrough render: an ElevenLabs key wins over WALKTHROUGH_MAC_VOICE', as
     process.env.PATH = path
     setRequestedExitCode(0)
     server.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('walkthrough render: WALKTHROUGH_KOKORO_VOICE voices the walkthrough with Kokoro', async () => {
+  setRequestedExitCode(0)
+  const dir = mkdtempSync(join(tmpdir(), 'walkthrough-cli-test-'))
+  writeRenderStubs(dir)
+  writeKokoroStubs(dir)
+  writeFileSync(join(dir, 'uv-cached'), '')
+  const path = process.env.PATH
+  process.env.PATH = `${dir}:${path ?? ''}`
+  const script = join(dir, 's.json')
+  writeFileSync(
+    script,
+    JSON.stringify({
+      title: 'T',
+      palette: 'classic',
+      scenes: [{ heading: 'A', narration: 'Read this. Then that.', visual: { kind: 'title' } }],
+    })
+  )
+  const stdout: string[] = []
+  const stderr = mock.method(console, 'error', () => undefined)
+  try {
+    const render = async (): Promise<unknown> => {
+      stdout.length = 0
+      await runWalkthroughRender(script, join(dir, 'o.mp4'), {
+        env: { WALKTHROUGH_KOKORO_VOICE: 'af_heart' },
+        stdout: (chunk) => stdout.push(chunk),
+      })
+      return JSON.parse(stdout.join(''))
+    }
+    // The uv stand-in times the four words of the narration at one second each; the ffmpeg
+    // stand-in writes an empty file.
+    const summary = {
+      output: join(dir, 'o.mp4'),
+      narrated: true,
+      voice: 'kokoro',
+      durationSeconds: 4 + SCENE_TAIL,
+      bytes: 0,
+      scenes: 1,
+      synthesizedScenes: 1,
+      cachedScenes: 0,
+      ttsCharacters: 0,
+      overNotionLimit: false,
+    }
+
+    assert.deepEqual(await render(), summary)
+    assert.equal(getRequestedExitCode(), 0)
+    assert.deepEqual(stderr.mock.calls, [])
+    assert.equal(stdout.length, 1)
+    const composed = readFileSync(join(dir, 'composed.html'), 'utf-8')
+    assert.match(composed, /<audio [^>]*src="audio\/scene-0\.m4a"/)
+    assert.doesNotMatch(composed, /data-caption=/)
+    const args = readFileSync(join(dir, 'ffmpeg-args'), 'utf-8').split('\n')
+    assert.ok(args.includes('-c:a'))
+    assert.ok(!args.includes('-an'))
+
+    stderr.mock.resetCalls()
+    assert.deepEqual(await render(), { ...summary, synthesizedScenes: 0, cachedScenes: 1 })
+    assert.equal(getRequestedExitCode(), 0)
+    assert.deepEqual(stderr.mock.calls, [])
+  } finally {
+    stderr.mock.restore()
+    process.env.PATH = path
+    setRequestedExitCode(0)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('walkthrough render: a macOS voice wins over WALKTHROUGH_KOKORO_VOICE', async () => {
+  setRequestedExitCode(0)
+  const dir = mkdtempSync(join(tmpdir(), 'walkthrough-cli-test-'))
+  writeRenderStubs(dir)
+  macVoiceStubs(dir)
+  writeKokoroStubs(dir)
+  const path = process.env.PATH
+  process.env.PATH = `${dir}:${path ?? ''}`
+  const script = join(dir, 's.json')
+  writeFileSync(
+    script,
+    JSON.stringify({
+      title: 'T',
+      palette: 'classic',
+      scenes: [{ heading: 'A', narration: 'Hello.', visual: { kind: 'title' } }],
+    })
+  )
+  const stdout: string[] = []
+  const stderr = mock.method(console, 'error', () => undefined)
+  try {
+    await runWalkthroughRender(script, join(dir, 'o.mp4'), {
+      env: { WALKTHROUGH_MAC_VOICE: 'Tester', WALKTHROUGH_KOKORO_VOICE: 'af_heart' },
+      stdout: (chunk) => stdout.push(chunk),
+    })
+    assert.equal(getRequestedExitCode(), 0)
+    const summary: unknown = JSON.parse(stdout.join(''))
+    assert.ok(typeof summary === 'object' && summary !== null && 'voice' in summary)
+    assert.equal(summary.voice, 'mac')
+    assert.throws(() => readFileSync(join(dir, 'uv-calls')), { code: 'ENOENT' })
+    assert.deepEqual(
+      stderr.mock.calls.map((call) => call.arguments),
+      [
+        [
+          'walkthrough: WALKTHROUGH_MAC_VOICE is set, so a macOS voice voices the walkthrough and WALKTHROUGH_KOKORO_VOICE is ignored.',
+        ],
+      ]
+    )
+  } finally {
+    stderr.mock.restore()
+    process.env.PATH = path
+    setRequestedExitCode(0)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('walkthrough render: a speaker Kokoro lacks exits 1', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'walkthrough-cli-test-'))
+  writeRenderStubs(dir)
+  writeKokoroStubs(dir)
+  writeFileSync(join(dir, 'uv-cached'), '')
+  const path = process.env.PATH
+  process.env.PATH = `${dir}:${path ?? ''}`
+  const script = join(dir, 's.json')
+  writeFileSync(
+    script,
+    JSON.stringify({
+      title: 'T',
+      palette: 'classic',
+      scenes: [{ heading: 'A', narration: 'Hello.', visual: { kind: 'title' } }],
+    })
+  )
+  const stdout: string[] = []
+  const stderr = mock.method(console, 'error', () => undefined)
+  try {
+    await runWalkthroughRender(script, join(dir, 'o.mp4'), {
+      env: { WALKTHROUGH_KOKORO_VOICE: 'af_nosuch' },
+      stdout: (chunk) => stdout.push(chunk),
+    })
+    assert.equal(getRequestedExitCode(), 1)
+    assert.deepEqual(stdout, [])
+    assert.deepEqual(
+      stderr.mock.calls.map((call) => call.arguments),
+      [[`${script}: Kokoro has no speaker "af_nosuch"`]]
+    )
+  } finally {
+    stderr.mock.restore()
+    process.env.PATH = path
+    setRequestedExitCode(0)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('walkthrough render: a non-English Kokoro speaker exits 1 before anything renders', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'walkthrough-cli-test-'))
+  writeRenderStubs(dir)
+  writeKokoroStubs(dir)
+  writeFileSync(join(dir, 'npx'), `#!/bin/sh\necho call >> "${dir}/npx-calls"\nexit 0\n`)
+  const path = process.env.PATH
+  process.env.PATH = `${dir}:${path ?? ''}`
+  const script = join(dir, 's.json')
+  writeFileSync(
+    script,
+    JSON.stringify({
+      title: 'T',
+      palette: 'classic',
+      scenes: [{ heading: 'A', narration: 'Hello.', visual: { kind: 'title' } }],
+    })
+  )
+  const stdout: string[] = []
+  const stderr = mock.method(console, 'error', () => undefined)
+  try {
+    await runWalkthroughRender(script, join(dir, 'o.mp4'), {
+      env: { WALKTHROUGH_KOKORO_VOICE: 'jf_alpha' },
+      stdout: (chunk) => stdout.push(chunk),
+    })
+    assert.equal(getRequestedExitCode(), 1)
+    assert.deepEqual(
+      stderr.mock.calls.map((call) => call.arguments),
+      [
+        [
+          'walkthrough: WALKTHROUGH_KOKORO_VOICE names "jf_alpha", whose language Kokoro can\'t time word by word; use an American (a…) or British (b…) English speaker.',
+        ],
+      ]
+    )
+    assert.deepEqual(stdout, [])
+    assert.throws(() => readFileSync(join(dir, 'npx-calls')), { code: 'ENOENT' })
+  } finally {
+    stderr.mock.restore()
+    process.env.PATH = path
+    setRequestedExitCode(0)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('CLI: walkthrough render: a Kokoro voice without uv exits 2', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'walkthrough-cli-test-'))
+  try {
+    writeFileSync(join(dir, 'ffmpeg'), '#!/bin/sh\nexit 0\n')
+    chmodSync(join(dir, 'ffmpeg'), 0o755)
+    writeFileSync(
+      join(dir, 's.json'),
+      JSON.stringify({
+        title: 'T',
+        palette: 'classic',
+        scenes: [{ heading: 'A', narration: 'Hello.', visual: { kind: 'title' } }],
+      })
+    )
+    const result = runCli({ PATH: dir, WALKTHROUGH_KOKORO_VOICE: 'af_heart' }, dir)
+    assert.equal(result.status, 2)
+    assert.equal(result.stdout, '')
+    assert.equal(
+      stderrBeyondNodeWarnings(result.stderr),
+      'walkthrough: WALKTHROUGH_KOKORO_VOICE is set, but uv is not on PATH; install it (brew install uv, or https://docs.astral.sh/uv/).'
+    )
+  } finally {
     rmSync(dir, { recursive: true, force: true })
   }
 })

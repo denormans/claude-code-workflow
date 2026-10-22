@@ -1,4 +1,4 @@
-import type { Alignment } from './tts.ts'
+import type { Alignment } from './narration.ts'
 
 // A walkthrough with no voice is read rather than heard (FLOW-423): its timing comes from a reading
 // pace instead of ElevenLabs' alignment, and its narration is shown as captions.

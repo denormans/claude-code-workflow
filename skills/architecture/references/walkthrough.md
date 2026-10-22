@@ -1,11 +1,11 @@
 # Walkthrough Videos
 
 The Architecture skill gives each architecture doc a walkthrough video at the top of its hosted
-Notion page: narrated by ElevenLabs or a macOS voice when one is configured, and silent with the
-narration as subtitles when neither is. The video tells the story of the work in a few minutes, so
-the user can review the design by watching it. The skill writes the script after the doc and
-renders it before hosting. Whenever a revision changes what the video says, it re-renders before
-re-hosting.
+Notion page: narrated by ElevenLabs, a macOS voice or a local Kokoro voice when one is
+configured, and silent with the narration as subtitles when none is. The video tells the story of
+the work in a few minutes, so the user can review the design by watching it. The skill writes the
+script after the doc and renders it before hosting. Whenever a revision changes what the video
+says, it re-renders before re-hosting.
 
 ## Files
 
@@ -15,7 +15,7 @@ All of these sit beside the doc in `docs/plans/`. `<doc-basename>` is the doc's 
 | File | What it is |
 |---|---|
 | `<doc-basename>.walkthrough.json` | The script. You write it. |
-| `<doc-basename>.walkthrough.cache/` | Narration audio, cached by text and voice, and by the model and speed the CLI pins for ElevenLabs or by the scene's cues for a macOS voice. `walkthrough render` writes it; keep it between renders. |
+| `<doc-basename>.walkthrough.cache/` | Narration audio, cached by text and voice, and by the model and speed the CLI pins for ElevenLabs, by the scene's cues for a macOS voice, or by the Kokoro version the CLI pins for Kokoro. `walkthrough render` writes it; keep it between renders. |
 | `<doc-basename>.walkthrough.mp4` | The video. |
 
 The doc's first line under its title embeds the video: `![Walkthrough](<doc-basename>.walkthrough.mp4)`.
@@ -24,20 +24,26 @@ Hosting turns that line into a Notion video (`skills/workflow-guide/references/n
 
 ## Choosing the voice
 
-Run `check-tools --require elevenlabs,mac-voice` first. A `failed` result for either one: stop
-and print the reason. Otherwise the first configured voice narrates the video:
+Run `check-tools --require elevenlabs,mac-voice,kokoro-voice` first. A `failed` result for any of
+them: stop and print the reason. Otherwise the first configured voice narrates the video:
 - `elevenlabs` configured: ElevenLabs narrates it. `ELEVEN_LABS_VOICE_ID` overrides the voice the
   CLI pins, per project.
 - else `mac-voice` configured: the macOS voice `WALKTHROUGH_MAC_VOICE` names narrates it, free and
   local. The name is as `say -v '?'` lists it. Premium voices, downloaded under System Settings →
   Accessibility → Read & Speak → System voice → Manage Voices… (Spoken Content before macOS 26),
   sound far better than the built-in compact ones.
-- neither: `walkthrough render` makes the video without a voice: each scene lasts as long as
+- else `kokoro-voice` configured: the Kokoro speaker `WALKTHROUGH_KOKORO_VOICE` names, such as
+  `af_heart`, narrates it, free and local. Only American (`a…`) and British (`b…`) English
+  speakers can be used. It needs uv. The first render downloads the model and its packages,
+  about 2 GB and 6 minutes, measured on one cold run in October 2026. Run the render in the
+  background. When its stderr says Kokoro is not set up yet, tell the user it is downloading the
+  model and its packages, about 2 GB, and will take several minutes.
+- none: `walkthrough render` makes the video without a voice: each scene lasts as long as
   reading its narration takes, and the narration shows as subtitles. Tell the user in one line
   that the walkthrough is silent and subtitled because no voice is configured.
 
-With both configured, ElevenLabs wins and `walkthrough render` says on stderr that the macOS voice
-is ignored.
+With more than one configured, the first in this order wins, and `walkthrough render` says on
+stderr which voices it ignored.
 
 ## Write the script
 
@@ -152,6 +158,8 @@ walkthrough render --script "docs/plans/<doc-basename>.walkthrough.json" --out "
   - `ffmpeg -version` doesn't run cleanly, whether `ffmpeg` is missing or broken;
   - `ELEVEN_LABS_API_KEY` is unset, `WALKTHROUGH_MAC_VOICE` is set, and `say` or `ffprobe` doesn't
     run cleanly, whether it is missing or broken (`say` is macOS-only);
+  - `WALKTHROUGH_KOKORO_VOICE` is set, the other two voices are unset, and `uv --version` doesn't
+    run cleanly, whether `uv` is missing or broken;
   - `hyperframes browser ensure`, run through `npx`, doesn't exit 0. For example: `npx` is missing,
     the HyperFrames package can't be fetched, or no Chrome can be found or downloaded.
 - An ElevenLabs error exits 1 with its status. Stop and report ElevenLabs as broken, the same as
@@ -159,8 +167,12 @@ walkthrough render --script "docs/plans/<doc-basename>.walkthrough.json" --out "
 - With `ELEVEN_LABS_API_KEY` unset, a `WALKTHROUGH_MAC_VOICE` naming a voice that isn't installed
   exits 1 before anything renders.
   Stop and report it, the same as `check-tools`' `onFailure` for `mac-voice`.
+- With the other two voices unset, a `WALKTHROUGH_KOKORO_VOICE` that isn't an English Kokoro
+  speaker name exits 1 before anything renders, and one Kokoro doesn't have, or can't download,
+  exits 1 when the scenes are voiced. Stop and report it, the same as `check-tools`' `onFailure`
+  for `kokoro-voice`.
 - stdout is a JSON summary. `narrated: false` means the video was rendered silent, with subtitles.
-  `voice` says which voice narrated it: `elevenlabs`, `mac`, or `null`.
+  `voice` says which voice narrated it: `elevenlabs`, `mac`, `kokoro`, or `null`.
   `overNotionLimit: true` means the video is over 20 MiB and won't upload.
   Host the doc without the video and tell the user.
 
@@ -201,8 +213,9 @@ The page lists the scenes in order. For each scene it gives:
 When the user's review changes the design:
 1. Edit the script wherever the change touches what the video says.
 2. Re-render. A scene is voiced again, and charged, only when the cache holds no audio for its text
-   in the voice, and the model and speed the CLI pins (for a macOS voice, the scene's cues), now in
-   use. Every other scene comes from the cache and costs nothing.
+   in the voice, and the model and speed the CLI pins (for a macOS voice, the scene's cues; for
+   Kokoro, the Kokoro version), now in use. Every other scene comes from the cache and costs
+   nothing.
 3. Re-host the doc and the script page.
 
 A hosted video never contradicts its hosted doc.
