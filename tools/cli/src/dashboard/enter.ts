@@ -156,8 +156,8 @@ export const runEnter = (
   // Only send --title when the caller explicitly passed one — the backend preserves the node's
   // existing title when --title is omitted. Previously this defaulted to `key`, which meant a
   // plain re-enter (no --title) clobbered an already-set real title back down to the bare key
-  // (the live FLOW-149 incident). A keyed node *created* without --title now registers with no
-  // client-sent title — acceptable because every skill template passes --title on first enter.
+  // (the live FLOW-149 incident). A keyed node *created* without --title registers with no title,
+  // and the board then shows its UUID — so every skill site that can mint a node passes --title.
   const title_ = title
   const args = [
     'session',

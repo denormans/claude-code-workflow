@@ -186,8 +186,16 @@ lock_now() {
 lock_wait() {
     case "$1" in
         flock) flock 9 ;;
-        lockf) /usr/bin/lockf -s 9 ;;
+        lockf) lockf_wait ;;
     esac
+}
+
+# macOS's lockf waits on a descriptor by calling flock() in a loop, a full core for the whole wait, so
+# python3 makes one blocking flock() on fd 9 instead. It is the same lock lockf takes, and fd 9 keeps
+# it once python3 exits. A python3 that is missing or cannot run falls back to lockf's wait, which
+# still works, only wastefully.
+lockf_wait() {
+    python3 -I -c 'import fcntl; fcntl.flock(9, fcntl.LOCK_EX)' 2>/dev/null || /usr/bin/lockf -s 9
 }
 
 # Display only — the kernel lock is the sole authority on who holds it.

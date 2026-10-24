@@ -92,6 +92,178 @@ test('a later release adds one commit and drops files gone from the export set',
   assert.equal(paths.includes('NEW.md'), true)
 })
 
+test('a release commit carries the co-authors of the source commits since the last release', () => {
+  const { src, target } = makeWorld()
+  assertPublished(publishSnapshot(src, target), target, { published: true, version: '1.2.3' })
+
+  commitFile(
+    src,
+    'A.md',
+    'feat: a\n\nCo-authored-by: Outside Contributor <outside@example.invalid>'
+  )
+  commitFile(
+    src,
+    'B.md',
+    'feat: b\n\nco-authored-by: Model Helper <model@example.invalid>\n' +
+      'Co-authored-by: Outside Contributor <OUTSIDE@example.invalid>'
+  )
+  tagRelease(src, '1.2.4')
+
+  assertPublished(publishSnapshot(src, target), target, { published: true, version: '1.2.4' })
+  assert.equal(
+    targetMessage(target),
+    'release: v1.2.4\n\n' +
+      'Co-authored-by: Model Helper <model@example.invalid>\n' +
+      'Co-authored-by: Outside Contributor <OUTSIDE@example.invalid>'
+  )
+})
+
+test('carries co-authors from every source release since the one the snapshot holds', () => {
+  const { src, target } = makeWorld()
+  assertPublished(publishSnapshot(src, target), target, { published: true, version: '1.2.3' })
+
+  commitFile(
+    src,
+    'A.md',
+    'feat: a\n\nCo-authored-by: Earlier Contributor <earlier@example.invalid>'
+  )
+  tagRelease(src, '1.2.4')
+  commitFile(src, 'B.md', 'feat: b\n\nCo-authored-by: Later Contributor <later@example.invalid>')
+  tagRelease(src, '1.2.5')
+
+  assertPublished(publishSnapshot(src, target), target, { published: true, version: '1.2.5' })
+  assert.equal(
+    targetMessage(target),
+    'release: v1.2.5\n\n' +
+      'Co-authored-by: Later Contributor <later@example.invalid>\n' +
+      'Co-authored-by: Earlier Contributor <earlier@example.invalid>'
+  )
+})
+
+test('withholds a co-author who names a private term or is the committer', () => {
+  const { src, target } = makeWorld()
+  assertPublished(publishSnapshot(src, target), target, { published: true, version: '1.2.3' })
+
+  commitFile(
+    src,
+    'A.md',
+    'feat: a\n\nCo-authored-by: seedhandle <seedhandle@example.invalid>\n' +
+      'Co-authored-by: Release Maintainer <RELEASE@example.invalid>\n' +
+      'Co-authored-by: Outside Contributor <outside@example.invalid>'
+  )
+  tagRelease(src, '1.2.4')
+
+  assertPublished(publishSnapshot(src, target), target, { published: true, version: '1.2.4' })
+  assert.equal(
+    targetMessage(target),
+    'release: v1.2.4\n\nCo-authored-by: Outside Contributor <outside@example.invalid>'
+  )
+})
+
+test('withholds a bot or a Claude model as a co-author', () => {
+  const { src, target } = makeWorld()
+  assertPublished(publishSnapshot(src, target), target, { published: true, version: '1.2.3' })
+
+  commitFile(
+    src,
+    'A.md',
+    'feat: a\n\n' +
+      'Co-authored-by: renovate[bot] <29139614+renovate[bot]@users.noreply.github.com>\n' +
+      'Co-authored-by: Claude Opus 5.5 (1M context) <noreply@anthropic.com>\n' +
+      'Co-authored-by: Claude Sonnet 5.5 <NoReply@Anthropic.com>\n' +
+      'Co-authored-by: Outside Contributor <outside@example.invalid>'
+  )
+  tagRelease(src, '1.2.4')
+
+  assertPublished(publishSnapshot(src, target), target, { published: true, version: '1.2.4' })
+  assert.equal(
+    targetMessage(target),
+    'release: v1.2.4\n\nCo-authored-by: Outside Contributor <outside@example.invalid>'
+  )
+})
+
+test('a folded co-author trailer is carried as one unfolded line', () => {
+  const { src, target } = makeWorld()
+  assertPublished(publishSnapshot(src, target), target, { published: true, version: '1.2.3' })
+
+  commitFile(src, 'A.md', 'feat: a\n\nCo-authored-by: Long\n  Name <long@example.invalid>')
+  tagRelease(src, '1.2.4')
+
+  assertPublished(publishSnapshot(src, target), target, { published: true, version: '1.2.4' })
+  assert.equal(
+    targetMessage(target),
+    'release: v1.2.4\n\nCo-authored-by: Long Name <long@example.invalid>'
+  )
+})
+
+test('refuses a shallow source when co-authors must be read and pushes nothing', () => {
+  const { src, target } = makeWorld()
+  assertPublished(publishSnapshot(src, target), target, { published: true, version: '1.2.3' })
+
+  commitFile(
+    src,
+    'A.md',
+    'feat: a\n\nCo-authored-by: Outside Contributor <outside@example.invalid>'
+  )
+  tagRelease(src, '1.2.4')
+  const shallow = makeDir('publish-snapshot-shallow-')
+  git(shallow, 'clone', '-q', '--depth', '1', `file://${src}`, '.')
+  git(shallow, 'remote', 'set-url', 'origin', git(src, 'remote', 'get-url', 'origin').trim())
+  git(shallow, 'fetch', '-q', '--depth', '1', 'origin', 'tag', 'claude-workflow-v1.2.3')
+  git(shallow, 'config', 'user.name', 'Release Maintainer')
+  git(shallow, 'config', 'user.email', 'release@example.invalid')
+
+  assertRefused(
+    publishSnapshot(shallow, target),
+    'the source repository is a shallow clone, ' +
+      'so its history since claude-workflow-v1.2.3 is incomplete'
+  )
+  assert.equal(targetLog(target).length, 1)
+})
+
+test('a release with no co-authors keeps the bare subject', () => {
+  const { src, target } = makeWorld()
+  assertPublished(publishSnapshot(src, target), target, { published: true, version: '1.2.3' })
+
+  commitFile(src, 'A.md', 'feat: a')
+  tagRelease(src, '1.2.4')
+
+  assertPublished(publishSnapshot(src, target), target, { published: true, version: '1.2.4' })
+  assert.equal(targetMessage(target), 'release: v1.2.4')
+})
+
+test('the first release carries no co-authors', () => {
+  const { src, target } = makeWorld()
+  commitFile(
+    src,
+    'A.md',
+    'feat: a\n\nCo-authored-by: Outside Contributor <outside@example.invalid>'
+  )
+  tagRelease(src, '1.2.4')
+
+  assertPublished(publishSnapshot(src, target), target, { published: true, version: '1.2.4' })
+  assert.equal(targetMessage(target), 'release: v1.2.4')
+})
+
+test("refuses when the snapshot's last release has no source tag and pushes nothing", () => {
+  const { src, target } = makeWorld()
+  assertPublished(publishSnapshot(src, target), target, { published: true, version: '1.2.3' })
+
+  commitFile(
+    src,
+    'A.md',
+    'feat: a\n\nCo-authored-by: Outside Contributor <outside@example.invalid>'
+  )
+  tagRelease(src, '1.2.4')
+  git(src, 'tag', '-d', 'claude-workflow-v1.2.3')
+
+  assertRefused(
+    publishSnapshot(src, target),
+    "the snapshot's v1.2.3 has no source tag claude-workflow-v1.2.3"
+  )
+  assert.equal(targetLog(target).length, 1)
+})
+
 test('publishes to main when the target defaults to another branch holding the same tree', () => {
   const { src, target } = makeWorld()
   targetWithOtherDefault(src, target)
@@ -456,6 +628,21 @@ const commitAll = (repo: string, message: string): void => {
     message
   )
 }
+
+const commitFile = (repo: string, path: string, message: string): void => {
+  writeFileSync(join(repo, path), `${path}\n`)
+  commitAll(repo, message)
+}
+
+const tagRelease = (src: string, version: string): void => {
+  writeFileSync(join(src, '.claude-plugin/plugin.json'), pluginJson(version))
+  commitAll(src, `chore: release ${version}`)
+  git(src, 'tag', `claude-workflow-v${version}`)
+  git(src, 'push', '-q', 'origin', 'HEAD:main', `claude-workflow-v${version}`)
+}
+
+const targetMessage = (target: string): string =>
+  git(target, 'log', '-1', '--format=%B', 'main').trimEnd()
 
 const git = (repo: string, ...args: string[]): string =>
   execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8' })

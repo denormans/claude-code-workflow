@@ -25,6 +25,8 @@ main() {
     trap cleanup EXIT
     case_free_lock_runs_the_command
     case_second_run_waits_for_the_first
+    case_waiting_run_uses_no_cpu
+    case_unrunnable_python3_still_waits
     case_killed_holder_frees_the_lock
     case_terminating_test_lock_stops_the_command
     case_interrupting_test_lock_stops_the_command
@@ -75,6 +77,51 @@ case_second_run_waits_for_the_first() {
     printf 'test-lock: waiting — held by %s running `bash -c echo a-start >> "$1"; sleep 3; echo a-end >> "$1" _ %s` (pid N) since TIME\ntest-lock: acquired after Ns — running\ntest-lock: released after Ns, exit 0\n' "$PWD" "$log" > "${dir}/b-err.expected"
     normalise < "${dir}/b-err" > "${dir}/b-err.normalised"
     same_bytes "serial: second run's transcript names the holder, then the turn" "${dir}/b-err.expected" "${dir}/b-err.normalised"
+}
+
+# A run waiting its turn must sleep in the kernel, not spin: some waits run an hour, and every waiting
+# agent burning a core for all of it starves the run that holds the lock.
+case_waiting_run_uses_no_cpu() {
+    local dir="${TMP_ROOT}/idle-wait" a_pid b_pid cpu
+    mkdir -p "$dir"
+    TEST_LOCK_ROOT="$dir" "$TEST_LOCK" -- bash -c 'touch "$1"; sleep 8' _ "${dir}/a-started" 2>/dev/null &
+    a_pid=$!
+    track "$a_pid"
+    wait_for "idle wait: holder started" 30 test -e "${dir}/a-started" || return
+    TEST_LOCK_ROOT="$dir" "$TEST_LOCK" -- true 2>"${dir}/b-err" &
+    b_pid=$!
+    track "$b_pid"
+    wait_for "idle wait: second run is waiting" 30 grep -q waiting "${dir}/b-err" || return
+    sleep 3
+    if cpu="$(tree_cpu_centiseconds "$b_pid")"; then
+        check "idle wait: a waiting run spends under 0.5s of CPU in 3s" "under 50" \
+            "$(if ((cpu < 50)); then echo "under 50"; else echo "${cpu} centiseconds"; fi)"
+    else
+        check "idle wait: a waiting run spends under 0.5s of CPU in 3s" "under 50" "unmeasured: ${cpu}"
+    fi
+    wait "$a_pid"
+    wait "$b_pid"
+}
+
+# A python3 on PATH that cannot run (a version-manager shim with no version selected, the Command Line
+# Tools stub) must not turn a contended wait into an unlocked run.
+case_unrunnable_python3_still_waits() {
+    local dir="${TMP_ROOT}/broken-python" log a_pid
+    mkdir -p "${dir}/bin"
+    log="${dir}/order"
+    printf '#!/bin/sh\necho "stub python3: no version selected" >&2\nexit 127\n' > "${dir}/bin/python3"
+    chmod +x "${dir}/bin/python3"
+    TEST_LOCK_ROOT="$dir" "$TEST_LOCK" -- bash -c 'echo a-start >> "$1"; sleep 3; echo a-end >> "$1"' _ "$log" 2>/dev/null &
+    a_pid=$!
+    track "$a_pid"
+    wait_for "broken python3: first run started" 30 test -s "$log" || return
+    PATH="${dir}/bin:${PATH}" TEST_LOCK_ROOT="$dir" "$TEST_LOCK" -- bash -c 'echo b >> "$1"' _ "$log" >"${dir}/b-out" 2>"${dir}/b-err"
+    check "broken python3: second run exits 0" "0" "$?"
+    wait "$a_pid"
+    check "broken python3: second run ran only after the first finished" "a-start a-end b" "$(tr '\n' ' ' < "$log" | sed 's/ $//')"
+    printf 'test-lock: waiting — held by %s running `bash -c echo a-start >> "$1"; sleep 3; echo a-end >> "$1" _ %s` (pid N) since TIME\ntest-lock: acquired after Ns — running\ntest-lock: released after Ns, exit 0\n' "$PWD" "$log" > "${dir}/b-err.expected"
+    normalise < "${dir}/b-err" > "${dir}/b-err.normalised"
+    same_bytes "broken python3: transcript holds only test-lock's own lines" "${dir}/b-err.expected" "${dir}/b-err.normalised"
 }
 
 case_killed_holder_frees_the_lock() {
@@ -344,6 +391,40 @@ STUB
 # Records a pid the suite backgrounded, so cleanup kills it even when its case fails.
 track() {
     echo "$1" >> "${TMP_ROOT}/pids"
+}
+
+# The CPU time a process and its children have used so far, in hundredths of a second.
+tree_cpu_centiseconds() {
+    local total=0 pid t cs children
+
+    children="$(pgrep -P "$1")" || { echo "no child of ${1} to measure"; return 1; }
+
+    for pid in "$1" $children; do
+        t="$(ps -o time= -p "$pid" | tr -d ' ')"
+        [[ -n "$t" ]] || { echo "ps printed no CPU time for ${pid}"; return 1; }
+        cs="$(cpu_centiseconds "$t")" || { echo "unparseable CPU time '${t}' for ${pid}"; return 1; }
+        total=$((total + cs))
+    done
+
+    echo "$total"
+}
+
+# ps prints CPU time as [dd-][hh:]mm:ss[.ss]: macOS shows hundredths, Linux whole seconds.
+cpu_centiseconds() {
+    awk '$0 !~ /^([0-9]+-)?([0-9]+:)*[0-9]+(\.[0-9]+)?$/ { exit 1 }
+    {
+        days = 0
+        if (index($0, "-")) {
+            days = substr($0, 1, index($0, "-") - 1)
+            $0 = substr($0, index($0, "-") + 1)
+        }
+        n = split($0, part, ":")
+        secs = 0
+        for (i = 1; i <= n; i++) {
+            secs = secs * 60 + part[i]
+        }
+        printf "%d\n", (days * 86400 + secs) * 100 + 0.5
+    }' <<< "$1"
 }
 
 no_process() {

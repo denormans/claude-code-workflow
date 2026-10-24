@@ -6,7 +6,8 @@ feedback, and cleans up after the merge. It ships as skills, hooks, agents, slas
 TypeScript CLI tools those use.
 
 This repository is a published snapshot. Development happens elsewhere, and each release lands here
-as a single commit. It does not take issues or pull requests.
+as a single commit. It does not take issues, pull requests or other contributions, but you're
+welcome to fork it and adapt it for your own use.
 
 ## Requirements
 

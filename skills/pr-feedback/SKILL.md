@@ -37,8 +37,10 @@ dashboard link add --kind ticket --label "<TICKET-ID>" --url "<jira-url>" "${TIC
 # either — once it exists, keyless is refused rather than silently resolved to it.
 # With no ticket the ticket's key IS the branch name, so this child takes --key
 # "<branch-name>-<repo-name>" instead: the suffix keeps it from ever equalling the ticket key.
+# The same --title as PR Lifecycle's block: this enter may be the one that mints the node, and the
+# rename guard refuses only a title that differs from the recorded one, so a re-enter passes.
 TICKET_NODE_KEY="$(dashboard session key --ticket "<TICKET-ID>")" || exit 1
-dashboard session enter --phase pr-feedback --key "<branch-name>" ${TICKET_NODE_KEY:+--parent-key "$TICKET_NODE_KEY"}
+dashboard session enter --phase pr-feedback --key "<branch-name>" --title "<repo-name> PR" ${TICKET_NODE_KEY:+--parent-key "$TICKET_NODE_KEY"}
 ```
 
 `link add` is idempotent per node on `(kind, url)`, so it's a no-op when an earlier skill already registered the same link. The first block resolves the ticket's keying from this session's registry — an empty lookup is the root (see `skills/board/references/dashboard-protocol.md` §1, The ticket node key). The branch-keyed child from the Additional block is a PR-level node, not a ticket-level one (out of scope for the ticket link per the design doc) — never attach `link add --kind ticket` to it. Run the `enter` and, when there is a ticket, the `link add` on every run without exception — the resolved target is correct whether or not a PR-level child already exists, so there is nothing left to skip. (If the `dashboard` CLI isn't installed the command no-ops on its own — run it regardless; never skip it on the assumption the dashboard is unavailable.) With no ticket, skip `link add`; the lookup still resolves the node. (protocol: `skills/board/references/dashboard-protocol.md`)
