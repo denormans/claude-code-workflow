@@ -159,6 +159,15 @@
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/artifact-read-guard.sh"
           }
         ]
+      },
+      {
+        "matcher": "Read|Grep|Glob",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/current-state-guard.sh"
+          }
+        ]
       }
     ],
     "UserPromptSubmit": [

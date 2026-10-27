@@ -4,11 +4,29 @@ A small macOS applet that opens `agent-session://` links from the board. For an 
 focuses the iTerm2 session the link names; if that session is gone, it opens a new iTerm2 tab in the
 session's launch directory and runs `claude --resume` for it.
 
-Install (builds `~/Applications/Agent Session.app` and registers the scheme):
+## Install
+
+The handler needs iTerm2, and Xcode or the Xcode Command Line Tools (`xcode-select --install`). It runs its
+helpers with `/usr/bin/python3`, which is only a stub until one of them is installed.
+
+The installer ships with the plugin. Run it from the plugin's marketplace copy, whose path is the same
+for every plugin version:
 
 ```bash
-tools/agent-session-handler/install.sh
+~/.claude/plugins/marketplaces/denormans-workflow/tools/agent-session-handler/install.sh
 ```
+
+If that copy is missing, run the same script from the newest version under
+`~/.claude/plugins/cache/denormans-workflow/workflow/`. From a checkout of this repository, run
+`tools/agent-session-handler/install.sh`.
+
+It builds `~/Applications/Agent Session.app`, copies the helpers into it, and registers it for
+`agent-session://` links. Because the app holds its own copy, updating the plugin does not change it:
+run the installer again to pick up a newer handler. Each run deletes the existing app before
+building the new one, so if a run fails, fix the error and run it again.
+
+The first time a link opens, macOS asks whether Agent Session may control iTerm2. Allow it. If it was
+denied, turn it back on in System Settings → Privacy & Security → Automation, under Agent Session.
 
 ## Finding a session that has moved
 

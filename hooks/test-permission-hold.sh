@@ -860,7 +860,7 @@ mkdir -p "$HOME35"
 set_config "$ROOT35" leaf "leaf-35"
 set_config "$ROOT35" item-id "item-35"
 set_config "$ROOT35" answers-line "[dashboard] item item-35 (approval): rejected — no thanks
-  → act on it, then consume it: \`dashboard item consume --item item-35 --session leaf-35\`"
+  → act on it, then consume it: \`dashboard item consume --item item-35\`"
 run_hold_hook "$ROOT35" "$HOME35" "session-35" "Bash" "rm -rf /tmp/x" "" "/tmp/proj"
 MESSAGE35=$(printf '%s' "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.decision.message' 2>/dev/null)
 check "35: the deny message is the note alone, not the consume line" "no thanks" "$MESSAGE35"

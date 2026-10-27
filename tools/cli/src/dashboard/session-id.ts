@@ -266,6 +266,21 @@ const resolveViaBoard = (
   return root ? root.id : null
 }
 
+export type BoardRootPresence = 'present' | 'absent' | 'unknown'
+
+// Like resolveViaBoard, but tells "the board has no active root for this session" apart from "the
+// board could not be read" (unreachable, `session list` failed, or its output did not parse).
+export const boardRootPresence = (rawId: string, bin: string | null): BoardRootPresence => {
+  const nodes = fetchBoardNodes(rawId, bin)
+  if (nodes === null) {
+    return 'unknown'
+  }
+  const hasActiveRoot = nodes.some(
+    (n) => isRootExternalId(n.externalId, rawId) && n.lifecycle === 'active'
+  )
+  return hasActiveRoot ? 'present' : 'absent'
+}
+
 // Is `id` a board node belonging to THIS session (fetchBoardNodes already scopes to rawId's own
 // externalId/rawId:key rows) that is genuinely active? Used to verify an explicit --session value
 // not found in the local registry before trusting it as a mutation target — parseBoardNodes' own

@@ -122,7 +122,7 @@ test('formatReleasedEntry: a question ends with a line naming its consume comman
   assert.equal(
     out,
     '[dashboard] item q1 (question): yes\n' +
-      '  → act on it, then consume it: `dashboard item consume --item q1 --session node-1`'
+      '  → act on it, then consume it: `dashboard item consume --item q1`'
   )
 })
 
@@ -134,7 +134,7 @@ test('formatReleasedEntry: a comment names the board reply, then the consume', (
       '  → reply on the board, not only in the terminal, unless it asks nothing and gives you nothing to act on: ' +
       '`dashboard item add --type info --answers c1 --session node-1 --prompt "$(cat "<tmpfile>")"`' +
       ' (a question instead only when the comment raises a decision that earns one),' +
-      ' then consume it: `dashboard item consume --item c1 --session node-1`'
+      ' then consume it: `dashboard item consume --item c1`'
   )
 })
 
@@ -152,6 +152,6 @@ test('formatReleasedEntry: the instruction follows the reference lines, so the f
   assert.deepEqual(out.split('\n'), [
     '[dashboard] item a1 (approval): rejected — no thanks',
     '  ↳ related to item q1 (question): Ship?',
-    '  → act on it, then consume it: `dashboard item consume --item a1 --session node-1`',
+    '  → act on it, then consume it: `dashboard item consume --item a1`',
   ])
 })

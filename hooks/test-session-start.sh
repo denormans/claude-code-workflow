@@ -371,6 +371,27 @@ print(out["hookEventName"], "<keep-it-simple>" in out["additionalContext"])' <"$
   check "real hook, $mode mode: valid JSON with the rules block" "$want_event True" "$got"
 done
 
+# --- Case 9: the subagent injection carries nothing task-specific ---------------
+# The current-state researcher must not learn the plan at spawn (FLOW-449). Runs the shipped hook
+# in subagent mode from a ticket worktree inside a workspace holding a plan, and checks that the
+# plan's text, its directory and the ticket id are all absent from what it injects, while the rules
+# block is still there (so an empty output cannot pass).
+CANARY_WS="$TMP_ROOT/canary-ws"
+CANARY_WT="$CANARY_WS/.worktrees/CANARY-77-plan"
+mkdir -p "$CANARY_WS/docs/plans" "$CANARY_WT"
+printf 'CANARY-PRD-9Z\n' >"$CANARY_WS/docs/plans/2026-01-01-canary-1-prd.md"
+printf '{"hook_event_name":"SubagentStart","agent_type":"workflow:current-state-researcher","agent_id":"a1","cwd":"%s"}' \
+  "$CANARY_WT" >"$TMP_ROOT/canary-in.json"
+(cd "$CANARY_WT" && "$HOOK_SCRIPT" subagent <"$TMP_ROOT/canary-in.json" >"$TMP_ROOT/canary-out.txt" 2>"$TMP_ROOT/canary-err.txt")
+check "subagent injection: exit 0" "0" "$?"
+CTX9="$(extract_context <"$TMP_ROOT/canary-out.txt")"
+case "$CTX9" in *"<keep-it-simple>"*) r=yes ;; *) r=no ;; esac
+check "subagent injection: rules block present" "yes" "$r"
+for canary in CANARY-PRD-9Z CANARY-77 docs/plans; do
+  case "$CTX9" in *"$canary"*) r=leaked ;; *) r=absent ;; esac
+  check "subagent injection: $canary absent" "absent" "$r"
+done
+
 # --- Summary ---------------------------------------------------------------
 echo
 echo "=== Results: $PASS passed, $FAIL failed ==="

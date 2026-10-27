@@ -194,6 +194,20 @@ Merging is the user's and stays board-gated — `skills/workflow-guide/contract.
 unavailable is putting the *message* to the user: a merge-method or trailer concern is not an
 escalation, and neither is a plan to ask about one.
 
+## A test-lock wait is not a question
+
+A test run queued behind `test-lock` is the lock doing its job: it runs when the run ahead of it
+finishes. It is never a question for the user, however long the wait or however idle the holder
+looks. This binds the agent whose run is queued and everyone who hears about the wait from it — a
+team lead, the senior engineer — alike.
+
+Leave a holder you did not start alone. Do not diagnose it — no `ps`, no `lsof`, no reading its
+CPU — and do not kill it, run your tests unlocked, or set `TEST_LOCK_HELD` to skip the lock. Do
+not ask about any of it either: not "kill it or let it run?", not "run it unlocked?", not on the
+board and not in the terminal. While the run waits, do the work that does not need it; the run
+finishing is your wake signal. A teammate reporting a queued run reports a wait, and the lead reads
+it as one.
+
 ## Required question form
 
 A question that survives the rungs carries **four things** — and the evidence behind them.

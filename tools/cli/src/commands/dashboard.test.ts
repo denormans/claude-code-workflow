@@ -14,7 +14,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { loadState, saveState, stateFilePath } from '../dashboard/state.ts'
-import { registryFilePath, upsertRegistryNode } from '../dashboard/registry.ts'
+import { loadRegistry, registryFilePath, upsertRegistryNode } from '../dashboard/registry.ts'
 import { stderrBeyondNodeWarnings } from '../testing/subprocess-stderr.ts'
 
 // ---------------------------------------------------------------------------
@@ -726,6 +726,106 @@ test('CLI FLOW-425: an unreadable lead registry is reported and the teammate’s
     stderr,
     `dashboard registry ${registryFilePath(LEAD_SESSION)} exists but could not be read (EISDIR)\n`
   )
+})
+
+// FLOW-445: a teammate's beat on its lead's leaves must not resume a node the lead paused.
+test('CLI FLOW-445: a teammate’s beat skips a lead leaf the lead paused while the board still reports it paused', () => {
+  upsertRegistryNode(LEAD_SESSION, {
+    internalId: 'lead-node-1',
+    externalId: `${LEAD_SESSION}_aaaa1111`,
+    key: null,
+    parentId: null,
+    paused: true,
+  })
+  const row = [
+    {
+      session: {
+        id: 'lead-node-1',
+        systemId: 'claude-workflow',
+        externalId: `${LEAD_SESSION}_aaaa1111`,
+        lifecycle: 'paused',
+        parentId: null,
+      },
+    },
+  ]
+
+  const { status, stdout, stderr } = runCliAsTeammate(['dashboard', 'session', 'heartbeat'], {
+    AI_WORKFLOW_APP_BIN: writeBranchingStub(tmpDir, JSON.stringify(row), ''),
+  })
+
+  assert.equal(status, 0)
+  assert.equal(stdout, '')
+  assert.equal(stderr, '')
+  assert.deepEqual(readCalls(tmpDir), ['session list'], 'read the board, sent no heartbeat')
+})
+
+test('CLI FLOW-445: dashboard session pause marks the node after the board pauses it', () => {
+  registerRootNode(rawId)
+
+  const { status, stdout, stderr } = runCli(['dashboard', 'session', 'pause'], {
+    CLAUDE_CODE_SESSION_ID: rawId,
+    AI_WORKFLOW_APP_BIN: writeBranchingStub(tmpDir, '', ''),
+  })
+
+  assert.equal(status, 0)
+  assert.equal(stdout, '')
+  assert.equal(stderrBeyondNodeWarnings(stderr), '')
+  assert.deepEqual(readCalls(tmpDir), [`session pause --id ${rawId}`])
+  assert.equal(loadRegistry(rawId).find((n) => n.internalId === rawId)?.paused, true)
+})
+
+test('CLI FLOW-445: dashboard session pause refuses a node it cannot mark, before the board is called', () => {
+  const { status, stdout, stderr } = runCli(
+    ['dashboard', 'session', 'pause', '--session', 'board-node-1'],
+    { CLAUDE_CODE_SESSION_ID: '', AI_WORKFLOW_APP_BIN: writeBranchingStub(tmpDir, '', '') }
+  )
+
+  assert.equal(status, 1)
+  assert.equal(stdout, '')
+  assert.equal(
+    stderrBeyondNodeWarnings(stderr),
+    "dashboard session pause: board-node-1 is not a node in this session's registry, so its pause " +
+      'could not be marked and the next heartbeat would resume it — nothing was paused'
+  )
+  assert.deepEqual(readCalls(tmpDir), [], 'the board was never asked to pause')
+})
+
+test('CLI FLOW-445: dashboard session pause with an unreadable registry names the registry and never calls the board', () => {
+  mkdirSync(registryFilePath(rawId), { recursive: true })
+
+  const { status, stdout, stderr } = runCli(['dashboard', 'session', 'pause'], {
+    CLAUDE_CODE_SESSION_ID: rawId,
+    AI_WORKFLOW_APP_BIN: writeBranchingStub(tmpDir, '', ''),
+  })
+
+  assert.equal(status, 1)
+  assert.equal(stdout, '')
+  assert.equal(
+    stderrBeyondNodeWarnings(stderr),
+    `dashboard registry ${registryFilePath(rawId)} exists but could not be read (EISDIR)`
+  )
+  assert.deepEqual(readCalls(tmpDir), [], 'the board was never asked to pause')
+})
+
+test('CLI FLOW-445: dashboard session resume clears the mark and sends a heartbeat', () => {
+  upsertRegistryNode(rawId, {
+    internalId: rawId,
+    externalId: rawId,
+    key: null,
+    parentId: null,
+    paused: true,
+  })
+
+  const { status, stdout, stderr } = runCli(['dashboard', 'session', 'resume'], {
+    CLAUDE_CODE_SESSION_ID: rawId,
+    AI_WORKFLOW_APP_BIN: writeBranchingStub(tmpDir, '', ''),
+  })
+
+  assert.equal(status, 0)
+  assert.equal(stdout, '')
+  assert.equal(stderrBeyondNodeWarnings(stderr), '')
+  assert.deepEqual(readCalls(tmpDir), [`session heartbeat --id ${rawId}`])
+  assert.equal(loadRegistry(rawId).find((n) => n.internalId === rawId)?.paused, undefined)
 })
 
 test('CLI: dashboard session status --json — unavailable branch, deterministic (nonexistent bin)', () => {

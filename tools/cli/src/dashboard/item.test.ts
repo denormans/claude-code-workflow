@@ -1,8 +1,16 @@
 import { test, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, existsSync, readFileSync, rmSync, chmodSync } from 'node:fs'
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  existsSync,
+  readFileSync,
+  rmSync,
+  chmodSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
 // ---------------------------------------------------------------------------
 // Helpers (shared pattern from dashboard.test.ts)
@@ -48,6 +56,24 @@ const writeBranchingStub = (dir: string, sessionListOut: string, otherOut: strin
       `else\n` +
       `  echo ${JSON.stringify(otherOut)}\n` +
       `fi\nexit 0\n`
+  )
+  chmodSync(path, 0o755)
+  return path
+}
+
+/** Stub that answers `session list` with an empty board, `session register` with a fresh active
+ * root, and every other verb with an itemId — the shape a session no workflow entered meets. */
+const writeConversationStub = (dir: string): string => {
+  const path = join(dir, 'ai-workflow-app')
+  writeFileSync(
+    path,
+    `#!/usr/bin/env bash\n` +
+      `echo "$@" >> ${JSON.stringify(join(dir, 'calls.log'))}\n` +
+      `if [ "$1" = "session" ] && [ "$2" = "list" ]; then echo '[]'; exit 0; fi\n` +
+      `if [ "$1" = "session" ] && [ "$2" = "register" ]; then\n` +
+      `  echo '{"id":"conv-node","parentId":null,"lifecycle":"active"}'; exit 0\n` +
+      `fi\n` +
+      `echo '{"itemId":"item-1"}'\nexit 0\n`
   )
   chmodSync(path, 0o755)
   return path
@@ -124,7 +150,10 @@ import {
   runItemFlushDeferred,
 } from './item.ts'
 import { loadState, stateFilePath, saveState, type DeferredQuestion } from './state.ts'
-import { upsertRegistryNode } from './registry.ts'
+import { upsertRegistryNode, registryFilePath } from './registry.ts'
+import { loadWorkflowState } from '../workflow-state/state.ts'
+import { sessionGlobalScope, storePath } from '../workflow-store/store.ts'
+import { escapeRegExp } from '../check-refs/escape-regexp.ts'
 import { setRequestedExitCode, getRequestedExitCode } from '../runtime-exit-code.ts'
 
 /** Registers `sessionId` as its own unkeyed root node — the shape most tests below need to make
@@ -373,30 +402,235 @@ test('runItemAdd unavailable + no session: no throw', () => {
   })
 })
 
-// The no-board tests above never reach resolveSessionTarget at all — they exit
-// at the earlier resolveDashboardBin() === null check (item.ts, ahead of the resolveSessionTarget
-// call). This test wires a reachable bin that answers `session list` with an empty board, so
-// runItemAdd clears that earlier check and resolveSessionTarget itself throws (no registered node,
-// zero leaves, board reachable but empty — session-id.ts's "run `dashboard session enter` first"
-// arm) — proving the try/catch around that call reuses the thrown message and sets exit 1 instead
-// of letting the throw escape as an uncaught exception.
-test('runItemAdd: reachable board, no registered session — refuses cleanly instead of throwing', () => {
-  process.env.AI_WORKFLOW_APP_BIN = writeStub(tmpDir, 0, '[]')
+test('runItemAdd: no node for this session — opens a conversation node, then posts', () => {
+  process.env.AI_WORKFLOW_APP_BIN = writeConversationStub(tmpDir)
 
-  let stderrOut = ''
-  let stdoutOut = ''
-  assert.doesNotThrow(() => {
-    stderrOut = captureStderr(() => {
-      stdoutOut = captureStdout(() => runItemAdd('question', 'What should we build?', questionDecl))
-    })
-  })
-
-  assert.ok(
-    stderrOut.includes('run `dashboard session enter` first'),
-    'stderr carries resolveSessionTarget’s own message'
+  const stdoutOut = captureStdoutAssertingSuccess(() =>
+    runItemAdd('question', '**What should we build?**\n\nDetail.', questionDecl)
   )
-  assert.equal(stdoutOut, '', 'a refusal must not leak a success payload onto stdout')
-  assert.equal(exitCodeIsError(), true, 'a caller must see this as a failure, not a success')
+
+  assert.deepEqual(JSON.parse(stdoutOut), { itemId: 'item-1' })
+  const calls = readCalls(tmpDir)
+  const registerAt = calls.findIndex((c) => c.startsWith('session register'))
+  assert.ok(registerAt >= 0, 'a node was registered')
+  assert.ok(calls[registerAt]!.includes('--phase conversation'))
+  assert.ok(calls[registerAt]!.includes('--title What should we build?'))
+  const postAt = calls.findIndex((c) => c.startsWith('item add --session conv-node'))
+  assert.ok(postAt > registerAt, 'the item is posted to the new node after it registers')
+  assert.equal(loadWorkflowState(process.env.CLAUDE_CODE_SESSION_ID!), null)
+})
+
+// The title the conversation node registers with: the register call's `--title` is its last
+// argument, so everything after it is the whole value.
+const registeredTitle = (prompt: string): string => {
+  process.env.AI_WORKFLOW_APP_BIN = writeConversationStub(tmpDir)
+  captureStdout(() => runItemAdd('question', prompt, questionDecl))
+  const line = readCalls(tmpDir).find((c) => c.startsWith('session register')) ?? ''
+  const flag = '--title '
+  assert.ok(line.includes(flag), line)
+  return line.slice(line.indexOf(flag) + flag.length)
+}
+
+test('runItemAdd: the conversation title keeps underscores, mid-line # and >, and an inner *', () => {
+  assert.equal(
+    registeredTitle('Rename snake_case_fn in PR #562 when a > b and 2*3?'),
+    'Rename snake_case_fn in PR #562 when a > b and 2*3?'
+  )
+})
+
+test('runItemAdd: a first line of only markdown markers titles the card with the fallback', () => {
+  assert.equal(registeredTitle('***\n\nDetail.'), 'Conversation')
+})
+
+test('runItemAdd: a long conversation title is cut on a code point, never mid surrogate pair', () => {
+  assert.equal(registeredTitle(`${'a'.repeat(78)}😀${'b'.repeat(10)}`), `${'a'.repeat(78)}😀…`)
+})
+
+test('runItemAdd: the conversation title drops bullet, task-box and ordered markers, not numbers', () => {
+  assert.equal(
+    registeredTitle('- [x] 2) Pick a DB for 2024 plans and 3.5 release'),
+    'Pick a DB for 2024 plans and 3.5 release'
+  )
+})
+
+test('runItemAdd: the conversation title drops a list marker and every flanking * run', () => {
+  assert.equal(
+    registeredTitle('* **Note**: pick a DB, use (**x**) for 2*3 and a * b'),
+    'Note: pick a DB, use (x) for 2*3 and a * b'
+  )
+})
+
+test('runItemAdd: an existing node is used as-is — no conversation node is opened', () => {
+  process.env.AI_WORKFLOW_APP_BIN = writeConversationStub(tmpDir)
+  const sessionId = process.env.CLAUDE_CODE_SESSION_ID!
+  registerRootNode(sessionId)
+
+  const stdoutOut = captureStdoutAssertingSuccess(() => runItemAdd('question', 'Q?', questionDecl))
+
+  const calls = readCalls(tmpDir)
+  assert.equal(calls.filter((c) => c.startsWith('session register')).length, 0)
+  assert.ok(calls.some((c) => c.startsWith(`item add --session ${sessionId}`)))
+  assert.deepEqual(JSON.parse(stdoutOut), { itemId: 'item-1' })
+})
+
+test('runItemAdd: a board read that fails is not "no root" — no node is opened and nothing posts', () => {
+  for (const [exitCode, stdout] of [
+    [1, ''],
+    [0, 'not json at all'],
+  ] as const) {
+    process.env.AI_WORKFLOW_APP_BIN = writeStub(tmpDir, exitCode, stdout)
+    rmSync(join(tmpDir, 'calls.log'), { force: true })
+    resetExitCode()
+
+    const stdoutOut = captureStdout(() => {
+      captureStderr(() => runItemAdd('question', 'Q?', questionDecl))
+    })
+
+    assert.equal(stdoutOut, '', 'no itemId is printed')
+    assert.equal(exitCodeIsError(), true)
+    const calls = readCalls(tmpDir)
+    assert.equal(calls.filter((c) => c.startsWith('session register')).length, 0)
+    assert.equal(calls.filter((c) => c.startsWith('item add')).length, 0)
+  }
+})
+
+test('runItemAdd: --defer on an existing node is judged at that node’s phase, not the conversation phase', () => {
+  process.env.AI_WORKFLOW_APP_BIN = writeConversationStub(tmpDir)
+  registerRootNode(process.env.CLAUDE_CODE_SESSION_ID!)
+  const lede = 'Ship v2?'
+  const recommend = 'Yes, ship it'
+  const declaration = `> **Recommend:** ${recommend} · **Stalls:** none · **Yours because:** scope`
+  // Exactly the cap with no phase line (the node has no recorded phase); a "conversation" phase line
+  // would push it over.
+  const evidence = 'e'.repeat(1500 - (lede.length + 2 + declaration.length + 2))
+
+  const stdoutOut = captureStdoutAssertingSuccess(() =>
+    runItemAdd('question', `${lede}\n\n${evidence}`, {
+      recommend,
+      stalls: 'none',
+      whyMine: 'scope',
+      defer: true,
+    })
+  )
+
+  assert.ok('deferredId' in JSON.parse(stdoutOut))
+})
+
+test('runItemAdd: --defer with an empty registry and an active board root queues without opening a node', () => {
+  const sessionId = process.env.CLAUDE_CODE_SESSION_ID!
+  process.env.AI_WORKFLOW_APP_BIN = writeBranchingStub(
+    tmpDir,
+    boardRow(sessionId, 0),
+    '{"itemId":"item-1"}'
+  )
+  const lede = 'Ship v2?'
+  const recommend = 'Yes, ship it'
+  const declaration = `> **Recommend:** ${recommend} · **Stalls:** none · **Yours because:** scope`
+  // Exactly the cap with no phase line; judged at the "conversation" phase it would be over.
+  const evidence = 'e'.repeat(1500 - (lede.length + 2 + declaration.length + 2))
+
+  const stdoutOut = captureStdoutAssertingSuccess(() =>
+    runItemAdd('question', `${lede}\n\n${evidence}`, {
+      recommend,
+      stalls: 'none',
+      whyMine: 'scope',
+      defer: true,
+    })
+  )
+
+  assert.ok('deferredId' in JSON.parse(stdoutOut))
+  const calls = readCalls(tmpDir)
+  assert.equal(calls.filter((c) => c.startsWith('session register')).length, 0)
+  assert.equal(calls.filter((c) => c.startsWith('session enter')).length, 0)
+})
+
+test('runItemAdd: a --defer question refused at validation opens no node', () => {
+  process.env.AI_WORKFLOW_APP_BIN = writeConversationStub(tmpDir)
+
+  const stderrOut = captureStderr(() =>
+    runItemAdd('question', 'Later?', { ...questionDecl, stalls: 'the release', defer: true })
+  )
+
+  assert.equal(exitCodeIsError(), true)
+  assert.ok(stderrOut.length > 0, 'the refusal is explained')
+  assert.equal(readCalls(tmpDir).filter((c) => c.startsWith('session register')).length, 0)
+})
+
+test('runItemAdd: an unreadable or malformed registry refuses cleanly and opens no node', () => {
+  process.env.AI_WORKFLOW_APP_BIN = writeConversationStub(tmpDir)
+  const sessionId = process.env.CLAUDE_CODE_SESSION_ID!
+  const registryPath = registryFilePath(sessionId)
+  mkdirSync(dirname(registryPath), { recursive: true })
+  const unreadable = (): void => mkdirSync(registryPath)
+  const malformed = (): void => writeFileSync(registryPath, '{ not json')
+  const registryProblems = [
+    {
+      plant: unreadable,
+      message: `dashboard registry ${registryPath} exists but could not be read (EISDIR)`,
+    },
+    {
+      plant: malformed,
+      message: `dashboard registry ${registryPath} exists but does not parse as JSON`,
+    },
+  ]
+  const posts = [
+    { label: 'post', run: () => runItemAdd('question', 'Q?', questionDecl) },
+    { label: 'defer', run: () => runItemAdd('question', 'Q?', { ...questionDecl, defer: true }) },
+  ]
+
+  for (const { plant, message } of registryProblems) {
+    for (const { label, run } of posts) {
+      rmSync(registryPath, { recursive: true, force: true })
+      plant()
+
+      const out = captureAll(run)
+
+      assert.deepEqual(out, { stdout: '', stderr: `${message}\n`, exit: 1 }, label)
+      assert.deepEqual(readCalls(tmpDir), [], label)
+    }
+  }
+})
+
+test('runItemAdd: a store that cannot be written refuses cleanly when the node cannot be opened', () => {
+  process.env.AI_WORKFLOW_APP_BIN = writeConversationStub(tmpDir)
+  const lockPath = storePath(
+    sessionGlobalScope(process.env.CLAUDE_CODE_SESSION_ID!),
+    'conversation-node.lock'
+  )
+  const posts = [
+    { label: 'post', run: () => runItemAdd('question', 'Q?', questionDecl) },
+    { label: 'defer', run: () => runItemAdd('question', 'Q?', { ...questionDecl, defer: true }) },
+  ]
+
+  for (const { label, run } of posts) {
+    rmSync(lockPath, { recursive: true, force: true })
+    mkdirSync(lockPath, { recursive: true })
+
+    const out = captureAll(run)
+
+    assert.equal(out.stdout, '', label)
+    assert.equal(out.exit, 1, label)
+    assert.match(
+      out.stderr,
+      new RegExp(
+        `^Path is a directory: rm returned EISDIR \\(is a directory\\) ${escapeRegExp(lockPath)}\\.steal\\.\\d+\\.\\d+\\.tmp\\n$`
+      ),
+      label
+    )
+    assert.deepEqual(readCalls(tmpDir), [], label)
+  }
+})
+
+test('runItemAdd: --key with no node still refuses — only the keyless form opens a node', () => {
+  process.env.AI_WORKFLOW_APP_BIN = writeConversationStub(tmpDir)
+
+  const stderrOut = captureStderr(() =>
+    runItemAdd('question', 'Q?', { ...questionDecl, key: 'nope' })
+  )
+
+  assert.equal(exitCodeIsError(), true)
+  assert.match(stderrOut, /no active node with key "nope"/)
+  assert.equal(readCalls(tmpDir).filter((c) => c.startsWith('session register')).length, 0)
 })
 
 test('runItemAdd: records itemId in openItemIds and prints it', () => {
@@ -2246,34 +2480,16 @@ test('--defer preserves parentId on queueDeferredQuestion’s own save', () => {
   )
 })
 
-// queueDeferredQuestion runs ahead of runItemAdd's own bin-resolve check (it queues instead of
-// posting — see the comment on that early-return), so a stub that IS reachable is what's needed to
-// reach queueDeferredQuestion's own resolveSessionTarget call. No node is registered, and the stub
-// answers `session list` with an empty board, so resolveSessionTarget throws (session-id.ts's "run
-// `dashboard session enter` first" arm) — proving the try/catch reuses that message and sets exit 1
-// instead of the throw escaping uncaught.
-test('--defer: reachable board, no registered session — refuses cleanly instead of throwing', () => {
-  process.env.AI_WORKFLOW_APP_BIN = writeStub(tmpDir, 0, '[]')
+test('runItemAdd: --defer with no node opens a conversation node, then queues', () => {
+  process.env.AI_WORKFLOW_APP_BIN = writeConversationStub(tmpDir)
 
-  let stderrOut = ''
-  let stdoutOut = ''
-  assert.doesNotThrow(() => {
-    stderrOut = captureStderr(() => {
-      stdoutOut = captureStdout(() =>
-        runItemAdd('question', 'Should the retry live in the client or the caller?', {
-          ...questionDecl,
-          defer: true,
-        })
-      )
-    })
-  })
-
-  assert.ok(
-    stderrOut.includes('run `dashboard session enter` first'),
-    'stderr carries resolveSessionTarget’s own message'
+  const stdoutOut = captureStdoutAssertingSuccess(() =>
+    runItemAdd('question', 'Later?', { ...questionDecl, defer: true })
   )
-  assert.equal(stdoutOut, '', 'a refusal must not leak a success payload onto stdout')
-  assert.equal(exitCodeIsError(), true, 'a caller must see this as a failure, not a success')
+
+  assert.ok('deferredId' in JSON.parse(stdoutOut))
+  const register = readCalls(tmpDir).find((c) => c.startsWith('session register'))
+  assert.ok(register?.includes('--phase conversation'))
 })
 
 // The same class as runItemAdd's corrupt-state guard above (FLOW-250, state.ts), for
@@ -4804,19 +5020,15 @@ test('runItemConsume single item: passes correct argv and drops id', () => {
   runItemConsume('item-c-1', false)
 
   const calls = readCalls(tmpDir)
-  assert.ok(calls[0]!.includes('consume'), 'calls consume')
-  assert.ok(calls[0]!.includes('--session'), 'includes --session')
-  assert.ok(calls[0]!.includes('--item item-c-1'), 'includes --item')
+  assert.equal(calls[0], 'consume --item item-c-1', 'no --session — the item names its session')
 
   const state = loadState(sessionId)
   assert.deepEqual(state!.openItemIds, ['item-c-2'], 'consumed item removed')
 })
 
-// FLOW-236 defect table row 3: two live leaves and no --key must refuse rather than sending
-// `--session <root>` and letting the backend reject it for the wrong reason ("Item does not
-// belong to session <root>"). Assert on the recorded invocation, not on error surfacing — the
-// backend must never be called at all.
-test('runItemConsume single item: sibling leaves with no --key refuses loudly, backend never invoked', () => {
+// Two live leaves and no --key: the item id alone is enough, so the board is called with --item
+// and no --session, and the id leaves only the ledger that lists it.
+test('runItemConsume single item: sibling leaves with no --key consume by id and drop it from the listing node', () => {
   const stubBin = writeStub(tmpDir, 0, '{}')
   process.env.AI_WORKFLOW_APP_BIN = stubBin
   const sessionId = process.env.CLAUDE_CODE_SESSION_ID!
@@ -4832,16 +5044,19 @@ test('runItemConsume single item: sibling leaves with no --key refuses loudly, b
     key: 'K2',
     parentId: null,
   })
+  saveState('node-k1', { registered: true, phase: 'prd', openItemIds: ['item-c-0'] })
+  saveState('node-k2', { registered: true, phase: 'prd', openItemIds: ['item-c-1', 'item-c-2'] })
 
-  let stderrOut = ''
-  assert.doesNotThrow(() => {
-    stderrOut = captureStderr(() => runItemConsume('item-c-1', false))
-  })
+  runItemConsume('item-c-1', false)
 
-  assert.ok(stderrOut.includes('K1'), 'stderr names the K1 leaf')
-  assert.ok(stderrOut.includes('K2'), 'stderr names the K2 leaf')
-  assert.equal(exitCodeIsError(), true, 'a caller must see this as a failure, not a success')
-  assert.equal(readCalls(tmpDir).length, 0, 'the backend is never invoked once resolution fails')
+  assert.deepEqual(
+    readCalls(tmpDir),
+    ['consume --item item-c-1', 'item show --item item-c-1'],
+    'one consume with no --session, then one owner lookup'
+  )
+  assert.deepEqual(loadState('node-k2')!.openItemIds, ['item-c-2'], 'the listing node drops it')
+  assert.deepEqual(loadState('node-k1')!.openItemIds, ['item-c-0'], 'the other node is untouched')
+  assert.equal(exitCodeIsError(), false, 'not a failure')
 })
 
 // FLOW-236 defect table row 6 (consume): --key must route to the named sibling, not the other
@@ -4871,13 +5086,142 @@ test('runItemConsume single item: --key targets the named sibling node', () => {
   runItemConsume('item-c-1', false, undefined, 'K2')
 
   const calls = readCalls(tmpDir)
-  assert.ok(calls[0]!.includes('--session node-k2'), 'targets the K2 node internal id')
+  assert.equal(
+    calls[0],
+    'consume --session node-k2 --item item-c-1',
+    'an explicit node is forwarded so the board can cross-check ownership'
+  )
   assert.deepEqual(loadState('node-k2')!.openItemIds, [], 'K2 ledger cleared of the consumed item')
   assert.deepEqual(
     loadState('node-k1')!.openItemIds,
     ['item-c-1'],
     'K1 ledger untouched — the other sibling never saw this call'
   )
+})
+
+test('runItemConsume single item: --key naming a node that does not own the item is refused by the board and no ledger changes', () => {
+  process.env.AI_WORKFLOW_APP_BIN = writeStub(
+    tmpDir,
+    1,
+    '',
+    'Error: Item does not belong to session node-k1'
+  )
+  const sessionId = process.env.CLAUDE_CODE_SESSION_ID!
+  upsertRegistryNode(sessionId, {
+    internalId: 'node-k1',
+    externalId: `${sessionId}:K1`,
+    key: 'K1',
+    parentId: null,
+  })
+  upsertRegistryNode(sessionId, {
+    internalId: 'node-k2',
+    externalId: `${sessionId}:K2`,
+    key: 'K2',
+    parentId: null,
+  })
+  saveState('node-k1', { registered: true, phase: 'prd', openItemIds: ['item-c-0'] })
+  saveState('node-k2', { registered: true, phase: 'prd', openItemIds: ['item-c-1'] })
+
+  const out = captureAll(() => runItemConsume('item-c-1', false, undefined, 'K1'))
+
+  assert.deepEqual(readCalls(tmpDir), ['consume --session node-k1 --item item-c-1'])
+  assert.deepEqual(out, {
+    stdout: '',
+    stderr:
+      'dashboard: ai-workflow-app consume --session node-k1 --item item-c-1 failed: ' +
+      'Error: Item does not belong to session node-k1\n',
+    exit: 1,
+  })
+  assert.deepEqual(loadState('node-k2')!.openItemIds, ['item-c-1'], 'the owning node keeps the id')
+  assert.deepEqual(loadState('node-k1')!.openItemIds, ['item-c-0'], 'the named node is untouched')
+})
+
+test('runItemConsume single item: an item owned by a node outside this registry is dropped from that node ledger', () => {
+  const stubBin = join(tmpDir, 'ai-workflow-app')
+  writeFileSync(
+    stubBin,
+    `#!/usr/bin/env bash\necho "$@" >> ${JSON.stringify(join(tmpDir, 'calls.log'))}\n` +
+      `case "$1" in item) echo '{"item":{"id":"item-c-1","sessionId":"node-other"}}';; *) echo '{}';; esac\n`
+  )
+  chmodSync(stubBin, 0o755)
+  process.env.AI_WORKFLOW_APP_BIN = stubBin
+  const sessionId = process.env.CLAUDE_CODE_SESSION_ID!
+  upsertRegistryNode(sessionId, {
+    internalId: 'node-k1',
+    externalId: `${sessionId}:K1`,
+    key: 'K1',
+    parentId: null,
+  })
+  saveState('node-k1', { registered: true, phase: 'prd', openItemIds: ['item-c-0'] })
+  saveState('node-other', { registered: true, phase: 'prd', openItemIds: ['item-c-1', 'item-c-2'] })
+
+  const out = captureAll(() => runItemConsume('item-c-1', false))
+
+  assert.deepEqual(readCalls(tmpDir), ['consume --item item-c-1', 'item show --item item-c-1'])
+  assert.deepEqual(out, { stdout: '', stderr: '', exit: 0 })
+  assert.deepEqual(loadState('node-other')!.openItemIds, ['item-c-2'], 'the owning node drops it')
+  assert.deepEqual(
+    loadState('node-k1')!.openItemIds,
+    ['item-c-0'],
+    'this session node is untouched'
+  )
+})
+
+test('runItemConsume single item: an unreadable registry after a successful board consume warns and exits clean', () => {
+  process.env.AI_WORKFLOW_APP_BIN = writeStub(tmpDir, 0, '{}')
+  const sessionId = process.env.CLAUDE_CODE_SESSION_ID!
+  upsertRegistryNode(sessionId, {
+    internalId: 'node-k1',
+    externalId: `${sessionId}:K1`,
+    key: 'K1',
+    parentId: null,
+  })
+  saveState('node-k1', { registered: true, phase: 'prd', openItemIds: ['item-c-1'] })
+  writeFileSync(registryFilePath(sessionId), '{ not json')
+
+  let out: ReturnType<typeof captureAll> | undefined
+  assert.doesNotThrow(() => {
+    out = captureAll(() => runItemConsume('item-c-1', false))
+  })
+
+  assert.deepEqual(readCalls(tmpDir), ['consume --item item-c-1', 'item show --item item-c-1'])
+  assert.deepEqual(out, {
+    stdout: '',
+    stderr:
+      `dashboard: the item was consumed on the board, but dashboard registry ` +
+      `${registryFilePath(sessionId)} exists but does not parse as JSON — the local open-item ` +
+      'ledger was left unchanged; reconcile it by hand once the registry is repaired.\n',
+    exit: 0,
+  })
+  assert.deepEqual(loadState('node-k1')!.openItemIds, ['item-c-1'], 'ledger left unchanged')
+})
+
+test('runItemConsume single item: a board app that still requires --session is retried with the resolved session', () => {
+  const stubBin = join(tmpDir, 'ai-workflow-app')
+  writeFileSync(
+    stubBin,
+    `#!/usr/bin/env bash\necho "$@" >> ${JSON.stringify(join(tmpDir, 'calls.log'))}\n` +
+      `case "$*" in *--session*) echo '{}'; exit 0;; esac\n` +
+      `echo 'Expected input for flag --session' >&2\nexit 1\n`
+  )
+  chmodSync(stubBin, 0o755)
+  process.env.AI_WORKFLOW_APP_BIN = stubBin
+  const sessionId = process.env.CLAUDE_CODE_SESSION_ID!
+  registerRootNode(sessionId)
+  saveState(sessionId, { registered: true, phase: 'prd', openItemIds: ['item-c-1', 'item-c-2'] })
+
+  const out = captureAll(() => runItemConsume('item-c-1', false))
+
+  assert.deepEqual(readCalls(tmpDir), [
+    'consume --item item-c-1',
+    `consume --session ${sessionId} --item item-c-1`,
+  ])
+  assert.deepEqual(
+    out,
+    { stdout: '', stderr: '', exit: 0 },
+    'the first rejection is not reported when the retry succeeds'
+  )
+  assert.deepEqual(loadState(sessionId)!.openItemIds, ['item-c-2'], 'the resolved node drops it')
 })
 
 // FLOW-236 defect table row 7: a sole leaf that is NOT the raw session id itself (an epic → story
@@ -4903,8 +5247,19 @@ test('runItemConsume single item: sole leaf under a parent node still resolves (
   runItemConsume('item-c-1', false)
 
   const calls = readCalls(tmpDir)
-  assert.ok(calls[0]!.includes('--session story'), 'targets the sole leaf (story)')
+  assert.equal(calls[0], 'consume --item item-c-1')
   assert.deepEqual(loadState('story')!.openItemIds, [], 'the sole leaf (story) ledger cleared')
+})
+
+test('runItemConsume single item: no Claude session id at all still consumes by id', () => {
+  process.env.AI_WORKFLOW_APP_BIN = writeStub(tmpDir, 0, '{}')
+  delete process.env.CLAUDE_CODE_SESSION_ID
+
+  const stderrOut = captureStderr(() => runItemConsume('item-c-1', false))
+
+  assert.deepEqual(readCalls(tmpDir), ['consume --item item-c-1', 'item show --item item-c-1'])
+  assert.equal(stderrOut, '', 'nothing to warn about — there is no local ledger to reconcile')
+  assert.equal(exitCodeIsError(), false)
 })
 
 test('runItemConsume --all: drops only the ids the board reported consuming', () => {
@@ -4996,7 +5351,7 @@ test('runItemConsume: neither item nor --all surfaces the backend refusal instea
 
   const calls = readCalls(tmpDir)
   assert.equal(calls.length, 1, 'the backend is invoked so its own refusal can surface')
-  assert.equal(calls[0], `consume --session ${sessionId}`, 'no --item, no empty --item, no --all')
+  assert.equal(calls[0], 'consume', 'bare — no --session, no --item, no --all')
   assert.match(stderrOut, /specify --item/, "the backend's refusal reaches the caller")
   assert.equal(exitCodeIsError(), true, 'a refused consume is a non-zero exit')
   const state = loadState(sessionId)

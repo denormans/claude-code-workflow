@@ -87,6 +87,8 @@ Then install its dependencies:
 
 The worktree is where the symlinked `node_modules` appears.
 
+**Stage hooks:** once dependencies are installed in a story worktree you just created — not a reused one, and not a `tmp/` throwaway — run `(cd "<worktree-path>" && workflow-hooks run --moment work-start.after --ticket "<TICKET-ID>")` (with no ticket, drop `--ticket`) and act on its exit code per `skills/workflow-guide/references/stage-hooks.md`.
+
 ### 5. Register Repo-Root Trust
 
 Claude Code stops its trust ancestor-walk at the enclosing git repo root, so a trusted directory

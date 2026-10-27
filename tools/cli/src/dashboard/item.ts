@@ -1,12 +1,23 @@
-import { resolveSessionTargetOrRefuse, tryResolveRawSessionId } from './session-id.ts'
+import {
+  boardRootPresence,
+  resolveSessionTargetOrRefuse,
+  tryResolveRawSessionId,
+} from './session-id.ts'
+import { claimLock, releaseLockAt } from '../pr-monitor/lock.ts'
+import { blockingSleep } from '../pr-monitor/state.ts'
+import { sessionGlobalScope, storePath } from '../workflow-store/store.ts'
+import { runEnter } from './enter.ts'
 import {
   dashboardAvailable,
   invokeDashboard,
   resolveDashboardBin,
   invokeDashboardBin,
+  invokeDashboardRaw,
 } from './invoke.ts'
 import { findBoardNodeFor } from './board-nodes.ts'
+import { loadRegistry, RegistryUnreadableError, type RegistryNode } from './registry.ts'
 import {
+  CONVERSATION_PHASE,
   corruptStateDiagnosis,
   deferredQuestionsOf,
   loadState,
@@ -20,7 +31,7 @@ import {
   type ItemReference,
   type WhyMine,
 } from './state.ts'
-import { setRequestedExitCode } from '../runtime-exit-code.ts'
+import { getRequestedExitCode, setRequestedExitCode } from '../runtime-exit-code.ts'
 import { splitLines } from '../split-lines.ts'
 
 // Caps in characters, measured by Unicode code point (`[...str].length`, not `str.length`'s UTF-16
@@ -99,6 +110,9 @@ const DASHBOARD_PROTOCOL_NOTES_SECTION = 'skills/board/references/dashboard-prot
 // terminal. Distinct from 1, which every refusal uses.
 const NO_BOARD_EXIT = 3
 
+// What a board app whose `consume --session` flag is still required prints when `--session` is omitted.
+const missingSessionFlagMessage = 'Expected input for flag --session'
+
 // add: post a question/approval item and record its id so the wake check knows a wait is pending and
 // reconcile can clear it — or post an info note, whose id is never recorded: nothing answers a note,
 // and the wake check and the Stop hook's gate read a non-empty openItemIds as "an answer can
@@ -107,7 +121,9 @@ const NO_BOARD_EXIT = 3
 // terminal; every refusal below (corrupt state, unconfirmed post) writes stderr and sets exit 1
 // instead. With a board and --defer, queues the question on this node instead — nothing posts, and
 // it prints {"deferredId":…}; `runItemFlushDeferred` posts the queue later. With no board, --defer
-// is handed back like any other question. Mutation verb — resolves strictly: fails loud on sibling
+// is handed back like any other question. With a board and no node for this session (no
+// `--session`/`--key`), it first opens the session's root node in the `conversation` phase
+// (FLOW-439). Mutation verb — resolves strictly: fails loud on sibling
 // ambiguity (pass --key) rather than silently guessing.
 export const runItemAdd = (
   type: 'question' | 'approval' | 'info',
@@ -213,11 +229,33 @@ export const runItemAdd = (
   // its own board item once the PR exists. It validates through queueDeferredQuestion's own
   // composition, ahead of the immediate-post composition below.
   if (type === 'question' && defer) {
+    if (session === undefined && key === undefined) {
+      // Runs only if a node is about to open, and that node carries CONVERSATION_PHASE, so that is
+      // the phase the cap is judged at. When a node already exists, queueDeferredQuestion judges
+      // the entry at that node's own phase.
+      const fitsConversationPhase = (): boolean => {
+        const parts = validateQuestionParts(prompt, { recommend, stalls, whyMine, defer })
+        return (
+          parts !== null &&
+          deferredEntryFits(deferredEntryFor(parts, 'q1', CONVERSATION_PHASE, references))
+        )
+      }
+      if (!ensureConversationNode(prompt, bin, fitsConversationPhase)) {
+        return
+      }
+    }
     queueDeferredQuestion(prompt, { recommend, stalls, whyMine, defer }, references, session, key)
     return
   }
   const composedPrompt = composeItem()
   if (composedPrompt === null) return
+  // A session no workflow entered still posts its questions to the board (contract rule 2), so
+  // open its root node here rather than refuse with "run `dashboard session enter` first".
+  if (session === undefined && key === undefined) {
+    if (!ensureConversationNode(prompt, bin)) {
+      return
+    }
+  }
   const sessionId = resolveSessionTargetOrRefuse(session, key)
   if (sessionId === null) return
   if (stateFileIsCorrupt(sessionId)) {
@@ -287,6 +325,171 @@ const handBackForTerminal = (
   setRequestedExitCode(NO_BOARD_EXIT)
 }
 
+const CONVERSATION_TITLE_MAX = 80
+const CONVERSATION_TITLE_FALLBACK = 'Conversation'
+
+// Opens this session's root node in the `conversation` phase when it has none: nothing in the
+// local registry and no active root on the board. workflowEntry false leaves the edit gate shut
+// and the title unrecorded locally, so a workflow entered later can still name the node.
+//
+// `beforeOpen`, when given, runs once the board has confirmed there is no root and a node is about
+// to open; returning false stops the open.
+//
+// Returns false when the caller must not post on: a board call made here failed and requested a
+// non-zero exit (posting on would print an itemId from a command that exits non-zero, which a
+// caller retries as a duplicate), `beforeOpen` refused, another `item add` in this session still
+// holds the lock, or opening threw (the error's message is written and the exit is 1).
+//
+// Parallel first posts are serialised by a pid-liveness lock (`claimLock`): one mints the root and
+// the rest find it. A holder that died is stolen from at once; a live holder is waited on for the
+// lock wait bound, then this call refuses rather than run unlocked, since a duplicate root would
+// make every later keyless `item add` refuse. The guarantee is `claimLock`'s, and it documents a
+// residual (see the note on `claimLock` in pr-monitor/lock.ts): a stale lock left by a holder killed
+// mid-call, together with three or more parallel keyless first posts in one session, can still mint
+// two roots.
+const ensureConversationNode = (
+  prompt: string,
+  bin: string,
+  beforeOpen?: () => boolean
+): boolean => {
+  try {
+    return openConversationNodeUnderLock(prompt, bin, beforeOpen)
+  } catch (err) {
+    process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`)
+    setRequestedExitCode(1)
+    return false
+  }
+}
+
+const openConversationNodeUnderLock = (
+  prompt: string,
+  bin: string,
+  beforeOpen?: () => boolean
+): boolean => {
+  const rawId = tryResolveRawSessionId()
+  if (rawId === null || registryMayHoldNodes(rawId)) {
+    return true
+  }
+
+  const lockPath = storePath(sessionGlobalScope(rawId), CONVERSATION_LOCK_NAME)
+  if (!claimConversationLock(lockPath)) {
+    process.stderr.write(
+      'dashboard: another `item add` in this session is still opening its board node — retry in a ' +
+        'few seconds.\n'
+    )
+    setRequestedExitCode(1)
+    return false
+  }
+
+  try {
+    const exitBefore = getRequestedExitCode()
+    if (registryMayHoldNodes(rawId)) {
+      return true
+    }
+
+    // Only a board that answered and holds no root is evidence there is none: a failed or
+    // unparseable read leaves the node alone and the post refuses as it did before.
+    if (boardRootPresence(rawId, bin) !== 'absent') {
+      return getRequestedExitCode() === exitBefore
+    }
+
+    if (beforeOpen !== undefined && !beforeOpen()) {
+      return false
+    }
+
+    runEnter(
+      undefined,
+      CONVERSATION_PHASE,
+      conversationTitle(prompt),
+      undefined,
+      undefined,
+      false,
+      undefined,
+      false
+    )
+    return getRequestedExitCode() === exitBefore
+  } finally {
+    releaseLockAt(lockPath)
+  }
+}
+
+// An unreadable or malformed registry is inconclusive, so it counts as holding nodes: no node opens
+// and the caller's own target resolution refuses with the registry error.
+const registryMayHoldNodes = (rawId: string): boolean => {
+  try {
+    return loadRegistry(rawId).length > 0
+  } catch (err) {
+    if (!(err instanceof RegistryUnreadableError)) {
+      throw err
+    }
+    return true
+  }
+}
+
+const CONVERSATION_LOCK_NAME = 'conversation-node.lock'
+const CONVERSATION_LOCK_WAIT_MS = 20_000
+const CONVERSATION_LOCK_POLL_MS = 50
+
+// DASHBOARD_CONVERSATION_LOCK_WAIT_MS overrides the 20 s wait bound; a test sets it to reach the
+// timeout without waiting it out.
+const conversationLockWaitMs = (): number => {
+  const override = Number(process.env.DASHBOARD_CONVERSATION_LOCK_WAIT_MS)
+  return Number.isFinite(override) && override > 0 ? override : CONVERSATION_LOCK_WAIT_MS
+}
+
+const claimConversationLock = (lockPath: string): boolean => {
+  const deadline = Date.now() + conversationLockWaitMs()
+
+  while (!claimLock(lockPath, 'conversation node').acquired) {
+    if (Date.now() >= deadline) {
+      return false
+    }
+    blockingSleep(CONVERSATION_LOCK_POLL_MS)
+  }
+
+  return true
+}
+
+// The board card's title: the item's first non-blank line, cut to CONVERSATION_TITLE_MAX code
+// points, with these removed: leading `>` quote markers, `#`-to-`######` heading markers, bullet
+// markers (`-`, `*`, `+`) and ordered markers (1-9 digits then `.` or `)`) when whitespace follows,
+// a `[ ]`, `[x]` or `[X]` task box after a bullet, backticks, and every `*` run except one with
+// whitespace or the line edge on both sides or a letter or digit on both. A `*` is removed whether
+// or not a partner exists. `_`, `#` and `>` elsewhere in the line stay, as do `2024 plans` and
+// `3.5 release`. A line with no letter or digit left falls back to CONVERSATION_TITLE_FALLBACK.
+const conversationTitle = (prompt: string): string => {
+  const firstLine = prompt.split('\n').find((line) => line.trim() !== '') ?? ''
+  const plain = stripEmphasisRuns(
+    firstLine
+      .trim()
+      .replace(/^(?:>\s*|#{1,6}\s+|[-*+]\s+(?:\[[ xX]\]\s+)?|\d{1,9}[.)]\s+)+/, '')
+      .replace(/`/g, '')
+  ).trim()
+  if (!/[\p{L}\p{N}]/u.test(plain)) {
+    return CONVERSATION_TITLE_FALLBACK
+  }
+
+  const codePoints = [...plain]
+  return codePoints.length > CONVERSATION_TITLE_MAX
+    ? `${codePoints.slice(0, CONVERSATION_TITLE_MAX - 1).join('')}…`
+    : plain
+}
+
+const stripEmphasisRuns = (text: string): string =>
+  text.replace(/\*+/g, (run, offset: number) =>
+    keepsAsterisks(text[offset - 1], text[offset + run.length]) ? run : ''
+  )
+
+// A `*` run is the text's own — `a * b`, `2*3` — when whitespace or the line edge is on both sides
+// of it, or a letter or digit is. `before` and `after` are undefined at the line edges.
+const keepsAsterisks = (before: string | undefined, after: string | undefined): boolean => {
+  const isSpace = (char: string | undefined): boolean => char === undefined || /\s/.test(char)
+  const isAlphanumeric = (char: string | undefined): boolean =>
+    char !== undefined && /[\p{L}\p{N}]/u.test(char)
+
+  return (isSpace(before) && isSpace(after)) || (isAlphanumeric(before) && isAlphanumeric(after))
+}
+
 // Validate exactly as the posting path does, then write the parts onto the node's own state instead
 // of posting. Prints {"deferredId":…}: the asker needs the id to drop the question later, and
 // `list-deferred` should not be the only way to learn it.
@@ -333,28 +536,13 @@ const queueDeferredQuestion = (
     return
   }
   const { id, counter } = nextDeferredId(state)
-  const entry: DeferredQuestion = {
-    id,
-    lede: parts.lede,
-    body: parts.body,
-    recommend: parts.recommend,
-    whyMine: parts.whyMine,
-    deferredAtPhase: base.phase,
-    ...(references.length > 0 ? { references } : {}),
-  }
+  const entry = deferredEntryFor(parts, id, base.phase, references)
   // Checked against what the FLUSH will actually compose for this one entry — composeDeferredEntry
   // adds the "Deferred at <phase>" line beyond what composeSingleQuestion's immediate-post shape
   // carries. Measured with no --context, since that is checked independently at flush time and is
   // not knowable here. Without this, one over-long entry could enter the queue and refuse every
   // later flush, with no way to shorten it short of dropping it.
-  if ([...composeDeferredEntry(entry, undefined)].length > COMPOSED_PROMPT_MAX_CHARS) {
-    refuseItem(
-      `this question, composed for the flush, is over the ${String(COMPOSED_PROMPT_MAX_CHARS)}-character cap — nothing was queued.`,
-      'The flush adds a "Deferred at <phase>" line on top of the declaration and evidence this cap ' +
-        'already measures, so an entry that only just fits the immediate-post shape can still refuse ' +
-        'the flush once queued.',
-      'Move the evidence to a linked doc or a PR comment and defer again'
-    )
+  if (!deferredEntryFits(entry)) {
     return
   }
   // Spread the loaded state rather than rebuilding it — a hand-rolled constructor silently drops any
@@ -367,6 +555,36 @@ const queueDeferredQuestion = (
     deferredIdCounter: counter,
   })
   process.stdout.write(JSON.stringify({ deferredId: entry.id }) + '\n')
+}
+
+const deferredEntryFor = (
+  parts: QuestionParts,
+  id: string,
+  deferredAtPhase: string,
+  references: ItemReference[]
+): DeferredQuestion => ({
+  id,
+  lede: parts.lede,
+  body: parts.body,
+  recommend: parts.recommend,
+  whyMine: parts.whyMine,
+  deferredAtPhase,
+  ...(references.length > 0 ? { references } : {}),
+})
+
+// False when the entry, composed for the flush, is over the cap — after refusing it on stderr.
+const deferredEntryFits = (entry: DeferredQuestion): boolean => {
+  if ([...composeDeferredEntry(entry, undefined)].length <= COMPOSED_PROMPT_MAX_CHARS) {
+    return true
+  }
+  refuseItem(
+    `this question, composed for the flush, is over the ${String(COMPOSED_PROMPT_MAX_CHARS)}-character cap — nothing was queued.`,
+    'The flush adds a "Deferred at <phase>" line on top of the declaration and evidence this cap ' +
+      'already measures, so an entry that only just fits the immediate-post shape can still refuse ' +
+      'the flush once queued.',
+    'Move the evidence to a linked doc or a PR comment and defer again'
+  )
+  return false
 }
 
 // The app's own `item add` flags, one pair per reference. The app checks each target (it must
@@ -1169,41 +1387,166 @@ export const runItemWithdraw = (
   return true
 }
 
-// consume: ack items the human answered in the dashboard (released → consumed).
+// consume: ack items the human answered in the dashboard (released → consumed). A single item
+// needs no session: the board resolves it from the item's own row, so `--item` alone works even
+// with several live leaves. `--all` spans one session, so it still resolves one.
 export const runItemConsume = (
   item: string | undefined,
   all: boolean,
   session?: string,
   key?: string
 ): void => {
-  if (!dashboardAvailable()) return
+  if (!dashboardAvailable()) {
+    return
+  }
+
+  if (item) {
+    consumeOneItem(item, session, key)
+    return
+  }
+
+  // Same as withdraw above: no item and no --all is invoked bare so the board app's own refusal
+  // reaches the caller (FLOW-236). It names no session, so none is resolved for it.
+  if (!all) {
+    invokeDashboard(['consume'])
+    return
+  }
+
   const sessionId = resolveSessionTargetOrRefuse(session, key)
-  if (sessionId === null) return
-  if (all) {
-    const out = invokeDashboard(['consume', '--session', sessionId, '--all'])
-    if (out === null) return
-    reportSkippedUnread(out)
-    const consumed = parseConsumedIds(out)
-    if (consumed === null) {
-      process.stderr.write(
-        'dashboard: consume --all did not report which items it consumed (backend predates ' +
-          'REV-67) — the local open-item ledger was left unchanged; reconcile it with ' +
-          '`dashboard item consume --item "<id>"`\n'
-      )
-      return
-    }
-    dropOpenItems(sessionId, consumed)
+  if (sessionId === null) {
     return
   }
-  // Same as withdraw above: let the backend refuse rather than returning silently. `consume`'s
-  // --session flag is required, so it is passed; omitting --item/--all is what triggers the
-  // refusal in the board app's `consume`.
-  if (!item) {
-    invokeDashboard(['consume', '--session', sessionId])
+
+  const out = invokeDashboard(['consume', '--session', sessionId, '--all'])
+  if (out === null) {
     return
   }
-  if (invokeDashboard(['consume', '--session', sessionId, '--item', item]) === null) return
+
+  reportSkippedUnread(out)
+  const consumed = parseConsumedIds(out)
+  if (consumed === null) {
+    process.stderr.write(
+      'dashboard: consume --all did not report which items it consumed (backend predates ' +
+        'REV-67) — the local open-item ledger was left unchanged; reconcile it with ' +
+        '`dashboard item consume --item "<id>"`\n'
+    )
+    return
+  }
+  dropOpenItems(sessionId, consumed)
+}
+
+// An explicit --session or --key names a node: it is resolved and verified first, its internal id is
+// forwarded so the board refuses an item that belongs to another session, and the id is dropped from
+// that node's ledger once the board succeeds. Without either, the board resolves the session from the
+// item's own row and the id is dropped from the owner the board reports, falling back to whichever of
+// this session's nodes lists it when the owner can't be read.
+const consumeOneItem = (item: string, session?: string, key?: string): void => {
+  if (session === undefined && key === undefined) {
+    consumeByIdAlone(item)
+    return
+  }
+
+  const sessionId = resolveSessionTargetOrRefuse(session, key)
+  if (sessionId === null) {
+    return
+  }
+
+  if (invokeDashboard(['consume', '--session', sessionId, '--item', item]) === null) {
+    return
+  }
+
   dropOpenItems(sessionId, [item])
+}
+
+// A board app that predates `--session` being optional rejects the bare call with Stricli's missing
+// flag message. That one failure falls back to the old behaviour: resolve a session and retry once
+// with it. Any other failure is reported as the board gave it.
+const consumeByIdAlone = (item: string): void => {
+  const args = ['consume', '--item', item]
+  const attempt = invokeDashboardRaw(args)
+  if (attempt === null) {
+    return
+  }
+
+  if (attempt.status === 0) {
+    const owner = owningNodeOf(item)
+    if (owner === null) {
+      dropFromListingNodes(item)
+    } else {
+      dropOpenItems(owner, [item])
+    }
+    return
+  }
+
+  if (!attempt.detail.includes(missingSessionFlagMessage)) {
+    process.stderr.write(`dashboard: ai-workflow-app ${args.join(' ')} failed: ${attempt.detail}\n`)
+    setRequestedExitCode(attempt.status ?? 1)
+    return
+  }
+
+  const sessionId = resolveSessionTargetOrRefuse()
+  if (sessionId === null) {
+    return
+  }
+
+  if (invokeDashboard(['consume', '--session', sessionId, '--item', item]) === null) {
+    return
+  }
+
+  dropOpenItems(sessionId, [item])
+}
+
+// The board node that owns the item, from `item show`, whose `item.sessionId` is the same internal
+// node id the local ledgers are keyed by. The item may belong to a session other than this one, so
+// its owner is asked of the board rather than looked up in this session's registry. null when the
+// board has no `item show` route, fails, or answers without a usable `item.sessionId`.
+const owningNodeOf = (item: string): string | null => {
+  const shown = invokeDashboardRaw(['item', 'show', '--item', item])
+  if (shown === null || shown.status !== 0) {
+    return null
+  }
+
+  try {
+    const sessionId = (JSON.parse(shown.stdout) as { item?: { sessionId?: unknown } }).item
+      ?.sessionId
+    return typeof sessionId === 'string' && sessionId.trim() !== '' ? sessionId : null
+  } catch {
+    return null
+  }
+}
+
+// The fallback when the owner is unknown: item ids are unique, so at most one of this session's nodes
+// lists it; none listing it is not an error (it was posted elsewhere, or the ledger already dropped
+// it). The board call has already succeeded by the time this runs, so an unreadable registry is
+// reported rather than refused.
+const dropFromListingNodes = (item: string): void => {
+  const rawId = tryResolveRawSessionId()
+  if (rawId === null) {
+    return
+  }
+
+  let nodes: RegistryNode[]
+  try {
+    nodes = loadRegistry(rawId)
+  } catch (err) {
+    if (!(err instanceof RegistryUnreadableError)) {
+      throw err
+    }
+    process.stderr.write(
+      `dashboard: the item was consumed on the board, but ${err.message} — the local open-item ` +
+        'ledger was left unchanged; reconcile it by hand once the registry is repaired.\n'
+    )
+    return
+  }
+
+  for (const node of nodes) {
+    const state = loadState(node.internalId)
+    if (state === null) {
+      warnIfLocalLedgerUnreconciled(node.internalId)
+    } else if (state.openItemIds.includes(item)) {
+      dropOpenItems(node.internalId, [item])
+    }
+  }
 }
 
 // shared helpers below their callers (top-down)

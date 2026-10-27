@@ -9,9 +9,12 @@ import {
 import { writeCapturedOutput, type CapturedOutput } from '../workflow-store/captured-output.ts'
 import { fitLine, type FitLineResult } from '../workflow-store/line-budget.ts'
 
-// The four acceptance-contract fields, as capture kinds. 'red' and 'green' are the two halves of a
-// RED baseline; 'sweep' and 'evidence' discharge the contract's other two fields.
-export type CaptureKind = 'sweep' | 'red' | 'green' | 'evidence'
+// The four acceptance-contract fields, as capture kinds, plus the slice check. 'red' and 'green' are
+// the two halves of a RED baseline; 'sweep' and 'evidence' discharge the contract's other two fields;
+// 'slice' is the end-to-end check that completes one vertical slice of a plan.
+export type CaptureKind = 'sweep' | 'red' | 'green' | 'evidence' | 'slice'
+
+export const CAPTURE_KINDS: readonly CaptureKind[] = ['sweep', 'red', 'green', 'evidence', 'slice']
 
 export interface ProofCaptureEvent {
   kind: 'proof-capture'
@@ -177,13 +180,13 @@ const serialize = (event: ProofCaptureEvent): FitLineResult<ProofCaptureEvent> =
     'proof-ledger'
   )
 
-const isCaptureKind = (value: unknown): value is CaptureKind =>
-  value === 'sweep' || value === 'red' || value === 'green' || value === 'evidence'
+export const isCaptureKind = (value: unknown): value is CaptureKind =>
+  CAPTURE_KINDS.some((kind) => kind === value)
 
 // A line this fold cannot use is COUNTED, never thrown on — one corrupt line must not make the whole
-// ledger unreadable. The count alone proves nothing; it is `run.ts`'s `runCheck` that turns a
-// non-zero count into a blocking result (exit 4) rather than letting the corrupt line quietly read
-// as an absent capture or absent requirement.
+// ledger unreadable. The count alone proves nothing; it is `run.ts`'s `runCheck` and
+// `runCheckSlices` that turn a non-zero count into a blocking result (exit 4) rather than letting
+// the corrupt line quietly read as an absent capture or absent requirement.
 const parseEvent = (line: string): LedgerEvent | null => {
   let parsed: unknown
   try {

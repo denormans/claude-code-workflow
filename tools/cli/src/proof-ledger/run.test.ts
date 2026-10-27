@@ -69,7 +69,7 @@ interface CliResult {
 const runCli = (args: string[], opts: { cwd?: string } = {}): Promise<CliResult> =>
   new Promise((resolve, reject) => {
     const child = spawn(process.execPath, ['--experimental-transform-types', mainTsPath, ...args], {
-      env: { ...process.env, HOME: homeDir },
+      env: { ...process.env, HOME: homeDir, NODE_NO_WARNINGS: '1' },
       ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
     })
     let stdout = ''
@@ -864,10 +864,10 @@ test('CLI: proof-ledger check --help states the exact brief runCheck actually en
   assert.equal(result.exitCode, 0)
   const briefLine = result.stdout
     .split('\n')
-    .find((line) => line.startsWith('Coverage check over the required capture kinds'))
+    .find((line) => line.startsWith('Checks either one task'))
   assert.equal(
     briefLine,
-    "Coverage check over the required capture kinds for a task at a sha — exits 3 if any required kind is missing or failing, or 4 if the ledger has a line it could not parse. --require is mandatory: name the kinds this task actually needs (sweep,evidence for a swept task; red,green for a guard/regression test; evidence alone for a sentinel task like repo-gates) — there is no default, since a fine-grained sub-proof task and its parent gate check need different kinds and the task name alone does not say which. Without --expect-command this checks presence per kind (one valid capture satisfies a kind), not count; name --expect-command to check that each expected capture under a kind exists individually. The required set can grow beyond --require and --expect-command from the ledger's own capture history for this task; there is no flag to disable that growth"
+    "Checks either one task's coverage or a plan's slice order. With --task and --require: coverage over the required capture kinds for that task at a sha — exits 3 if any required kind is missing or failing, or 4 if the ledger has a line it could not parse. --require has no default: name the kinds this task actually needs (sweep,evidence for a swept task; red,green for a guard/regression test; evidence alone for a sentinel task like repo-gates), since a fine-grained sub-proof task and its parent gate check need different kinds and the task name alone does not say which. Without --expect-command this checks presence per kind (one valid capture satisfies a kind), not count; name --expect-command to check that each expected capture under a kind exists individually. The required set can grow beyond --require and --expect-command from the ledger's own capture history for this task; there is no flag to disable that growth. With --slices instead: each named slice task, in the order given, must have at least one slice capture on a commit between origin/main and --sha and no invalid one there, its earliest after the previous slice's and recorded before the commit that follows it — exits 3 when any slice is missing, failing, out-of-order or late, 4 on an unparseable ledger line, 6 when origin/main..--sha does not resolve in --repo-root. A rebase rewrites the branch's commits, so a capture recorded before one reads missing. Mixing the two modes' flags, naming neither mode, or passing --repo-root without --slices, exits 6"
   )
 })
 
@@ -992,7 +992,7 @@ test('check through the real CLI process exits 3 and names the missing kind', as
   assert.deepEqual(parsed.missing, ['evidence'])
 })
 
-test('check through the real CLI process rejects an omitted --require at the parsing layer, not with an inferred default', async () => {
+test('check through the real CLI process refuses an omitted --require rather than inferring a default', async () => {
   const result = await runCli([
     'proof-ledger',
     'check',
@@ -1003,13 +1003,15 @@ test('check through the real CLI process rejects an omitted --require at the par
     '--task',
     'task-1',
   ])
-  assert.equal(result.exitCode, 252, "Stricli's own parse-failure code")
+  assert.equal(result.exitCode, 6)
   assert.equal(
     result.stdout,
-    '',
-    'a parse-layer rejection never reaches func, so no JSON is printed'
+    JSON.stringify({
+      error:
+        'check needs --require, or --slices: --require has no default, since the kinds a task needs cannot be inferred from its name',
+    }) + '\n'
   )
-  assert.match(result.stderr, /Expected input for flag --require/)
+  assert.equal(result.stderr, '')
 })
 
 test('check through the real CLI process rejects a bad --require value by naming --require, not --capture', async () => {
@@ -1026,8 +1028,11 @@ test('check through the real CLI process rejects a bad --require value by naming
     'bogus',
   ])
   assert.equal(result.exitCode, 252, "Stricli's own parse-failure code")
-  assert.match(result.stderr, /--require must be one of sweep, red, green, evidence, got: bogus/)
-  assert.doesNotMatch(result.stderr, /--capture must be/, 'must not misname the flag as --capture')
+  assert.equal(result.stdout, '')
+  assert.equal(
+    result.stderr,
+    'Failed to parse "bogus" for require: --require must be one of sweep, red, green, evidence, slice, got: bogus\n'
+  )
 })
 
 // The property under test in the B1, D1, and B2 cases below: no path may reduce `required`, or an

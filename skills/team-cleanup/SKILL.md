@@ -86,6 +86,8 @@ Run that once per pair, and confirm each call succeeded before moving on. A pair
 
 ### 3. Remove Worktrees
 
+**Stage hooks:** before removing anything, run `(cd "<worktree-path>" && workflow-hooks run --moment cleanup.before --ticket "<TICKET-ID>")` (once per repo in a multi-repo story) and act on its exit code per `skills/workflow-guide/references/stage-hooks.md`; a blocking failure holds the removal until it is answered.
+
 First stop any playtest still running from a worktree you are about to remove. `playtest list`
 prints every recorded playtest with its `dir`; for each one whose `dir` is the story worktree or
 inside it, or one of the `tmp/<TICKET-ID>-*` worktrees, run `playtest stop --name "<its name>"`.
@@ -239,6 +241,8 @@ its exit code — so, like the branch-delete capture above, it records as `--cap
 ran>" --exit "$rc" --output-file "<file>" --sha-is-label`. Index it under the story's proofs file
 alongside branch-deleted — team config clean, no orphaned processes, and worktree gone are already
 indexed at step 4.
+
+**Stage hooks:** once the branch is deleted, run `(cd "<repo-root>" && workflow-hooks run --moment cleanup.after --ticket "<TICKET-ID>")` (once per repo in a multi-repo story) and act on its exit code per `skills/workflow-guide/references/stage-hooks.md`, before step 7.
 
 ### 7. Auto-Continue Epic (if applicable)
 

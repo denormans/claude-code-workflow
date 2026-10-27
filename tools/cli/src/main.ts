@@ -18,6 +18,7 @@ import { snapshotReleaseNotesCommand } from './commands/snapshot-release-notes.t
 import { validateMermaidCommand } from './commands/validate-mermaid.ts'
 import { walkthroughRoutes } from './commands/walkthrough.ts'
 import { workflowStateRoutes } from './commands/workflow-state.ts'
+import { workflowHooksRoutes } from './commands/workflow-hooks.ts'
 import { workspaceTrustRoutes } from './commands/workspace-trust.ts'
 import { getRequestedExitCode } from './runtime-exit-code.ts'
 import { STORE_UNREADABLE_EXIT, StoreUnreadableError } from './workflow-store/store.ts'
@@ -43,6 +44,7 @@ const routes = buildRouteMap({
     'validate-mermaid': validateMermaidCommand,
     walkthrough: walkthroughRoutes,
     'workflow-state': workflowStateRoutes,
+    'workflow-hooks': workflowHooksRoutes,
     'workspace-trust': workspaceTrustRoutes,
   },
   docs: {

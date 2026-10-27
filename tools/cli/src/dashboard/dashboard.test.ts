@@ -38,6 +38,46 @@ const readCalls = (dir: string): string[] => {
   return readFileSync(log, 'utf-8').split('\n').filter(Boolean)
 }
 
+/**
+ * A stub that records its argv like `writeStub` and answers `session list` with one board row for
+ * `nodeId` in `lifecycle`, exiting `listExit` on that call. Every other call exits 0.
+ */
+const writeBoardStub = (
+  dir: string,
+  rawId: string,
+  nodeId: string,
+  lifecycle: string,
+  listExit = 0
+): string => {
+  const path = join(dir, 'ai-workflow-app')
+  const rows = JSON.stringify([
+    {
+      session: {
+        id: nodeId,
+        systemId: 'claude-workflow',
+        externalId: `${rawId}_0123abcd`,
+        lifecycle,
+        parentId: null,
+      },
+    },
+  ])
+  writeFileSync(
+    path,
+    [
+      '#!/usr/bin/env bash',
+      `echo "$@" >> ${JSON.stringify(join(dir, 'calls.log'))}`,
+      'if [ "$1 $2" = "session list" ]; then',
+      `  printf '%s\\n' ${JSON.stringify(rows)}`,
+      `  exit ${listExit}`,
+      'fi',
+      'exit 0',
+      '',
+    ].join('\n')
+  )
+  chmodSync(path, 0o755)
+  return path
+}
+
 // ---------------------------------------------------------------------------
 // Env / module isolation helpers
 // ---------------------------------------------------------------------------
@@ -224,6 +264,52 @@ test('heartbeat passes --id to session heartbeat', () => {
   assert.ok(calls[0]!.includes('session heartbeat'), 'calls session heartbeat')
   assert.ok(calls[0]!.includes('--id'), 'includes --id flag')
   assert.ok(calls[0]!.includes(sessionId), 'includes the session id')
+})
+
+// FLOW-445: the board resumes a paused session on any heartbeat, and the wake mod beats right
+// after the turn that paused it, so a beat that reached the board would undo the pause.
+const markedLeaf = (rawId: string) => ({
+  internalId: 'leaf-1',
+  externalId: `${rawId}_0123abcd`,
+  key: null,
+  parentId: null,
+  paused: true,
+})
+
+test('heartbeat skips a marked leaf while the board still reports it paused', () => {
+  const rawId = process.env.CLAUDE_CODE_SESSION_ID!
+  process.env.AI_WORKFLOW_APP_BIN = writeBoardStub(tmpDir, rawId, 'leaf-1', 'paused')
+  upsertRegistryNode(rawId, markedLeaf(rawId))
+
+  runHeartbeat()
+
+  const calls = readCalls(tmpDir)
+  assert.ok(calls.includes('session list'), 'the board was read before the beat was skipped')
+  const beats = calls.filter((c) => c.startsWith('session heartbeat'))
+  assert.deepEqual(beats, [], 'no heartbeat reaches the board for the paused leaf')
+  assert.equal(exitCodeIsError(), false, 'skipping is not a failure')
+})
+
+test('heartbeat beats a marked leaf the board has resumed', () => {
+  const rawId = process.env.CLAUDE_CODE_SESSION_ID!
+  process.env.AI_WORKFLOW_APP_BIN = writeBoardStub(tmpDir, rawId, 'leaf-1', 'active')
+  upsertRegistryNode(rawId, markedLeaf(rawId))
+
+  runHeartbeat()
+
+  const beats = readCalls(tmpDir).filter((c) => c.startsWith('session heartbeat'))
+  assert.deepEqual(beats, ['session heartbeat --id leaf-1'])
+})
+
+test('heartbeat beats a marked leaf when the board cannot be read', () => {
+  const rawId = process.env.CLAUDE_CODE_SESSION_ID!
+  process.env.AI_WORKFLOW_APP_BIN = writeBoardStub(tmpDir, rawId, 'leaf-1', 'paused', 1)
+  upsertRegistryNode(rawId, markedLeaf(rawId))
+
+  captureStderr(() => runHeartbeat())
+
+  const beats = readCalls(tmpDir).filter((c) => c.startsWith('session heartbeat'))
+  assert.deepEqual(beats, ['session heartbeat --id leaf-1'])
 })
 
 test('end passes --id to session end', () => {

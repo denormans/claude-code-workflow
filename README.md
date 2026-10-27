@@ -63,6 +63,7 @@ None of these is required. Each one changes what the workflow does when it is pr
 | A macOS voice (`WALKTHROUGH_MAC_VOICE`) | The walkthrough video is narrated by that voice, when ElevenLabs isn't configured | With `ELEVEN_LABS_API_KEY` unset, Kokoro narrates it if `WALKTHROUGH_KOKORO_VOICE` is set; otherwise the video is silent, with the narration as subtitles |
 | A Kokoro voice (`WALKTHROUGH_KOKORO_VOICE`) | The walkthrough video is narrated by that local voice, when neither ElevenLabs nor a macOS voice is configured | With the other two unset as well, the video is silent, with the narration as subtitles |
 | The board (`ai-workflow-app`) | Questions and approvals go to the board | The workflow asks in the terminal |
+| The Agent Session handler (macOS, iTerm2), installed per [its README](tools/agent-session-handler/README.md#install) | A board session's jump-back link focuses that session's iTerm2 pane, or resumes it in a new tab | The jump-back link opens nothing |
 | CodeRabbit | Its review is part of the pull request loop | Only the agent review runs |
 
 The board is a separate application and is not published. Every variable the plugin reads is listed
@@ -141,6 +142,73 @@ Only someone running the plugin's own test suite needs these.
 | `TEST_CONCURRENCY` | How many test workers `pnpm test` runs at once. Default: a cap of at most 4, worked out from the machine's size. An explicit value is used as given. |
 | `DASHBOARD_INVOKE_TIMEOUT_MS` | Milliseconds each call to the board binary may take. Default: `5000`; the test script sets `30000`. |
 | `MAILBOX_CHECK_BUDGET_MS` | Replaces the session check's 100-second time budget. Used by tests only. |
+
+## Workflow stage hooks
+
+You can make the workflow run your own steps at named moments without changing the workflow. A step
+is either a shell command, which the workflow runs, or an instruction, which the agent carries out.
+
+Steps live in up to three JSON files, all with the same shape:
+
+| File | Applies to | Commit it? |
+|---|---|---|
+| `~/.claude/workflow-hooks.json` (under `CLAUDE_CONFIG_DIR` when that is set) | Every project you work in | It is yours, outside any repo |
+| `.claude/workflow-hooks.json` in a project | Everyone working in that project | Yes, where the project commits `.claude/` |
+| `.claude/workflow-hooks.local.json` in a project | Only you, in that project | No |
+
+All three run: your user steps first, then the shared project file's, then the private one's.
+Within a moment, every command step runs in file order before any instruction is carried out:
+instructions come back only after all the commands have run.
+Project files are always read from the project's main checkout, so a file git ignores still
+applies inside the workflow's worktrees, and a change to a committed one takes effect once it
+reaches the main checkout. There is no separate approval for project steps, the same as Claude
+Code's own project hooks, so read a project's hooks file as you would its code.
+
+```json
+{
+  "version": 1,
+  "hooks": {
+    "work-start.after": [
+      { "name": "copy-env", "run": "cp \"$WORKFLOW_PROJECT_ROOT/.env\" .env" }
+    ],
+    "pr-opened.after": [
+      { "name": "link-pr", "instruct": "Add the PR link to the ticket as a comment." }
+    ]
+  }
+}
+```
+
+- `name` is unique within its file. A project file can switch off one of your user steps with
+  `"disable": ["<name>"]`.
+- Set exactly one of `run` (a shell command) or `instruct` (an instruction for the agent).
+- `blocking` defaults to `false`: a failure is reported and the workflow carries on. When a
+  blocking step fails, the workflow stops at that moment and asks you what to do.
+- `timeoutSeconds` applies to commands only. It is a whole number of seconds from 1 to 86400,
+  and defaults to 300.
+
+Commands run with `sh -c` from the top level of the current checkout, with these variables set when
+the workflow knows them: `WORKFLOW_MOMENT`, `WORKFLOW_TICKET`, `WORKFLOW_BRANCH`,
+`WORKFLOW_WORKTREE`, `WORKFLOW_PROJECT_ROOT` (the main checkout), `WORKFLOW_PR_URL` and
+`WORKFLOW_TESTS_OUTCOME` (`pass` or `fail`). A variable the workflow does not know is left unset.
+
+| Moment | When it runs |
+|---|---|
+| `prd.before`, `prd.after` | A PRD is started; a PRD is approved |
+| `architecture.before`, `architecture.after` | An architecture doc is started; one is approved |
+| `change-summary.before`, `change-summary.after` | A quick change's summary is started; one is approved |
+| `bug-summary.before`, `bug-summary.after` | A bug summary is started; one is approved |
+| `work-start.after` | A story's worktree is created and its dependencies installed |
+| `team-start.before`, `team-start.after` | Around spawning the implementation team |
+| `tests.before`, `tests.after` | Around the implementer's gate runs, scoped test run and red/green runs, the senior engineer's licensed gate re-run, and the team lead's own declared gates |
+| `pr-opened.after` | The draft pull request is created |
+| `pr-ready.before`, `pr-ready.after` | Around the pull request leaving draft (only `after` when you flip it yourself in GitHub) |
+| `pr-human-review.after` | The bots are satisfied and a human review is requested |
+| `pr-merged.after` | The pull request is merged |
+| `cleanup.before`, `cleanup.after` | Around removing the worktree and branch after merge |
+
+To see every step that will run, where it comes from and what is switched off, ask Claude to run
+`workflow-hooks list` (the plugin's commands are on the PATH inside a Claude session).
+[`examples/workflow-hooks.json`](examples/workflow-hooks.json) is a starting point.
 
 ## Long-running sessions
 

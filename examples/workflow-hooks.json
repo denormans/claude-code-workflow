@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "hooks": {
+    "work-start.after": [
+      { "name": "copy-env", "run": "cp \"$WORKFLOW_PROJECT_ROOT/.env\" .env" }
+    ],
+    "tests.before": [
+      { "name": "start-db", "run": "docker compose up -d db", "blocking": true, "timeoutSeconds": 120 }
+    ],
+    "pr-opened.after": [
+      { "name": "link-pr", "instruct": "Add the PR link to the ticket as a comment." }
+    ],
+    "cleanup.after": [
+      { "name": "stop-db", "run": "docker compose down" }
+    ]
+  }
+}

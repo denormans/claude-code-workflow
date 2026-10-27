@@ -184,7 +184,7 @@ test('runReadAnswers: calls answers --session <id> and prints the formatted line
   assert.equal(
     stdoutOut,
     '[dashboard] item item-appr-1 (approval): rejected — not ready yet\n' +
-      `  → act on it, then consume it: \`dashboard item consume --item item-appr-1 --session ${sessionId}\`\n`
+      `  → act on it, then consume it: \`dashboard item consume --item item-appr-1\`\n`
   )
 })
 
@@ -206,7 +206,7 @@ test('runReadComments: a released comment names its reply and consume commands',
       '  → reply on the board, not only in the terminal, unless it asks nothing and gives you nothing to act on: ' +
       `\`dashboard item add --type info --answers comment-1 --session ${sessionId} --prompt "$(cat "<tmpfile>")"\`` +
       ' (a question instead only when the comment raises a decision that earns one),' +
-      ` then consume it: \`dashboard item consume --item comment-1 --session ${sessionId}\`\n`
+      ` then consume it: \`dashboard item consume --item comment-1\`\n`
   )
 })
 

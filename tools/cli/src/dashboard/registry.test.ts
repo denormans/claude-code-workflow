@@ -281,3 +281,16 @@ test('registry file lands under sessions/<partition>/ and resolves from a differ
     rmSync(elsewhere, { recursive: true, force: true })
   }
 })
+
+test('loadRegistry: refuses a node whose paused field is not a boolean', () => {
+  const path = registryFilePath(rawId)
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(
+    path,
+    JSON.stringify({
+      nodes: [{ internalId: 'n1', externalId: rawId, key: null, parentId: null, paused: 'yes' }],
+    })
+  )
+
+  assert.throws(() => loadRegistry(rawId), /its nodes field is not an array of nodes/)
+})

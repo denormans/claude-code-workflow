@@ -81,6 +81,8 @@ dashboard link add --kind ticket --label "<TICKET-ID>" --url "<jira-url>" "${TIC
 ```
 This re-enters the node the lookup names — its own node when this ticket has one (work run as a story under an epic root), otherwise the root — updating its title to the real summary. `--retitle` is what authorises the rename — without it the CLI refuses to rename a node it already entered.
 
+**Stage hooks:** run `workflow-hooks run --moment change-summary.before --ticket "<TICKET-ID>"` now, from the launch directory (with no ticket, drop `--ticket`), and act on its exit code per `skills/workflow-guide/references/stage-hooks.md`.
+
 ### 3. Write the Change Summary Doc
 
 File path: `docs/plans/YYYY-MM-DD-<topic>-1-change.md`
@@ -154,6 +156,8 @@ Do NOT invoke Team Dispatch until the user has validated the change summary doc.
 ## Handoff to Team Dispatch
 
 Once the change summary doc is approved:
+
+First run `workflow-hooks run --moment change-summary.after --ticket "<TICKET-ID>"` from the launch directory (with no ticket, drop `--ticket`) and act on its exit code per `skills/workflow-guide/references/stage-hooks.md`; a blocking failure holds the handoff until it is answered.
 
 1. Invoke the **Team Dispatch** skill (`workflow:team-dispatch`). Pass it the Jira ticket ID (or, with no ticket, the branch name) and the change summary doc filename. Team Dispatch accepts a `-1-change.md` file as its design input, the same way it accepts `-2-arch.md` or `-1-bug.md`.
 2. Team Dispatch runs its normal chain: implementation plan, worktree, team, execution, senior review, draft PR, PR monitor, process improvement notes, team cleanup.

@@ -1,5 +1,6 @@
 import { resolveSessionId, resolveRawSessionId } from '../dashboard/session-id.ts'
 import {
+  CONVERSATION_PHASE,
   loadState as loadDashboardState,
   hashId,
   stateFileIsCorrupt,
@@ -123,6 +124,20 @@ export const runStopGate = (session?: string): void => {
     unreadableTargets.length === 0 &&
     released.length === 0 &&
     openItemIds.length > 0
+  ) {
+    clearGateState(gateKey)
+    console.log('allow')
+    return
+  }
+
+  // A conversation node is one `item add` opened for a session no workflow entered (FLOW-439).
+  // With nothing open or released there is no work to send the agent back to, so the zero-item
+  // block below does not apply.
+  if (
+    registryUnreadable === undefined &&
+    unreadableTargets.length === 0 &&
+    released.length === 0 &&
+    activePhase === CONVERSATION_PHASE
   ) {
     clearGateState(gateKey)
     console.log('allow')

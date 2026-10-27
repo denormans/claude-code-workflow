@@ -185,9 +185,10 @@ Every stop in this runbook posts, captures, and (with a board) records exactly t
 `agentBusy` set: the autonomy-rail STOP, the implementer reporting its plan didn't work, both rebase-conflict
 STOPs, and the `unknown` event. Once the user answers, see "On the answer".
 
-**On the answer.** What happens next depends on how the user answered. With no board there is no
-`<id>`: the terminal reply is the answer, the `consume` steps below do not apply, and the `outcome` is
-still merged into the PR's record (creating it with no `item`) so a `leave` holds:
+**On the answer.** Resume the board node first (see "Restarting the monitor" — "Pausing the board
+node"). What happens next depends on how the user answered. With no board there is no `<id>`: the
+terminal reply is the answer, the `consume` steps below do not apply, and the `outcome` is still
+merged into the PR's record (creating it with no `item`) so a `leave` holds:
 
 - **Go-ahead with a plan** → merge `outcome: "dispatch"` into the PR's board-item record (stop the
   monitor first, see "State file" — "Stop before writing"), **then** `dashboard item consume --item
@@ -277,6 +278,8 @@ Keep the task id this returns. A restart replaces it with a new one (see "Restar
 the most recent start or restart; the loop lock's recorded pid is for dead-monitor detection only,
 not a stop handle.
 
+Then pause the board node (see "Restarting the monitor" — "Pausing the board node").
+
 For a one-off manual tick (e.g. after replaying state by hand):
 
 ```
@@ -294,6 +297,8 @@ renovate-pr-monitor --once --verbose --dry-run
 `ci-pending`), not just ones that drive an action.
 
 ## When the monitor exits
+
+Resume the board node first (see "Restarting the monitor" — "Pausing the board node").
 
 In loop mode the script only exits on one of:
 
@@ -414,7 +419,9 @@ The dispatch prompt is the teammate's brief. Include:
 2. **When the teammate reports back:**
    - **Pushed the fix** → clear `agentBusy` (stop the monitor first, see "State file" — "Stop
      before writing") and retitle the node to say code changed (see "The board" — this informs, it
-     asks nothing). The running monitor re-classifies the PR next tick once CI reruns.
+     asks nothing). The running monitor re-classifies the PR next tick once CI reruns. Then pause
+     the board node, after the retitle and only if no other implementer teammate is still working
+     (see "Restarting the monitor" — "Pausing the board node").
    - **Reported the plan didn't work** → re-diagnose with its findings and re-dispatch a corrected
      plan, or, if it now needs judgment, post a board question with the teammate's findings, leave
      `agentBusy` set (see "The board" — "Asking"), and act on the answer (see "The board" — "On the
@@ -803,6 +810,37 @@ If you're handling several events in one session, wait until all are resolved
 before restarting — the monitor would immediately re-exit on the next
 unresolved one otherwise.
 
+### Pausing the board node
+
+The monitor usually drains the queue for hours with nobody touching it. Once it is running and no
+implementer teammate is working a PR, the last thing before going idle is:
+
+```bash
+dashboard session pause
+```
+
+The node leaves the board's active sections and stops reading as hung. Its open items stay. The
+heartbeat after this turn does not undo the pause, because `session heartbeat` skips a node it
+paused while the board still reports it paused.
+
+On every path, pause only when no implementer teammate is still working. A working teammate's
+beats skip the marked node, so a paused node would read as idle mid-work. Pause once the last one
+has reported back.
+
+The pause is the last board action before going idle. A heartbeat, an `item add` (and the other
+item writers that add, withdraw, resolve or release an item) and a `session enter`, retitle
+included, each set a paused node active again, and `session enter` also drops the registry mark.
+Pause after the last of them, never before.
+
+Every wake of a paused session starts with:
+
+```bash
+dashboard session resume
+```
+
+That covers a monitor event, a dead-monitor line, a board answer and a teammate's report-back. It
+is safe when the node is already active. Then handle the wake as this runbook says.
+
 ## Dead-monitor wake
 
 If the loop is killed, crashes, or is lost to a session restart without exiting cleanly, it cannot
@@ -815,7 +853,8 @@ last heartbeat <heartbeatAt>. No further event can arrive. Restart it: renovate-
 ```
 
 This is not a monitor event — no PR classification changed, it's news that the observer itself died.
-Restart the monitor as usual (see "Restarting the monitor"); that restart is this event's handling.
+Resume the board node, then restart the monitor as usual (see "Restarting the monitor"); that
+restart is this event's handling.
 
 ## Notifications
 

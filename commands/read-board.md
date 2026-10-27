@@ -18,6 +18,6 @@ Pick up board answers this session has not handled. Do the following now:
 
 4. **Act.** Handle each released item exactly as the skill that posted it would — `skills/board/references/dashboard-protocol.md` §3, §4 and §6: apply an answered question, advance on an approval, revise per a rejection's note, reply to a comment on the board, on the node it was released on, never only in the terminal, unless §6 exempts it. If you cannot tell what an item was asking, read its prompt back with `dashboard item show --item "<item-id>"`; never ask the user to repeat an answer.
 
-5. **Consume.** For each item you acted on, run `dashboard item consume --session "<id>" --item "<item-id>"` (`skills/board/references/dashboard-protocol.md` §6). Step 3 is what marks an item read, and consume refuses an unread one, so never consume before reading. Consume a comment only after its board reply is posted, unless §6 exempts it.
+5. **Consume.** For each item you acted on, run `dashboard item consume --item "<item-id>"` (`skills/board/references/dashboard-protocol.md` §6). Step 3 is what marks an item read, and consume refuses an unread one, so never consume before reading. Consume a comment only after its board reply is posted, unless §6 exempts it.
 
 6. **Report**, per node and separately for answers and for comments: the items read, what you did with each, and which were consumed. Say "nothing released" for one only when it printed its explicit "No released" line. Say its read failed or is unknown only when it printed nothing or exited non-zero, as step 3 defines.

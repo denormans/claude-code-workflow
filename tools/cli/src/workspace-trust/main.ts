@@ -1,7 +1,7 @@
-import { execFileSync } from 'node:child_process'
-import { existsSync, readFileSync, realpathSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { basename, dirname, join, resolve, sep } from 'node:path'
+import { join, sep } from 'node:path'
+import { canonicalPath, mainCheckoutRoot } from '../git-paths.ts'
 import { setRequestedExitCode } from '../runtime-exit-code.ts'
 import { atomicWrite } from '../workflow-store/store.ts'
 
@@ -81,35 +81,7 @@ export const runWorkspaceTrustEnsure = (repoPath: string | undefined): void => {
 // repo root — confirmed against the real Claude Code 2.1.232 binary from both a plain repo root and
 // from inside a linked worktree: both produce the same key Claude Code itself names in
 // `set projects["<key>"].hasTrustDialogAccepted: true`.
-const trustKeyFor = (path: string): string | null => {
-  const commonDir = gitCommonDir(path)
-  if (commonDir !== null && basename(commonDir) === '.git') return canonicalPath(dirname(commonDir))
-  return canonicalPath(path)
-}
-
-const gitCommonDir = (path: string): string | null => {
-  try {
-    const stdout = execFileSync(
-      'git',
-      ['-C', path, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }
-    )
-    return stdout.trim()
-  } catch {
-    return null
-  }
-}
-
-// realpath so a symlinked path and its target produce one key. Returns null — never a lexical
-// stand-in — when the path can't be resolved on disk: a lexical fallback here would let a path
-// through the launch-dir guard without ever confirming what it actually points at.
-const canonicalPath = (path: string): string | null => {
-  try {
-    return realpathSync(resolve(path))
-  } catch {
-    return null
-  }
-}
+const trustKeyFor = (path: string): string | null => mainCheckoutRoot(path) ?? canonicalPath(path)
 
 const isWithin = (parent: string, child: string): boolean =>
   child === parent || child.startsWith(parent.endsWith(sep) ? parent : parent + sep)

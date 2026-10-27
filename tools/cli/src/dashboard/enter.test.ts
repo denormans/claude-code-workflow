@@ -1454,3 +1454,24 @@ test('runEnter: a keyless enter with --session refreshes that session’s root, 
   const expected = `link add --session ${rootId} --kind return --label iTerm --url agent-session://iterm/AAAA-BBBB?${query}`
   assert.deepEqual(linkCalls, [expected, expected])
 })
+
+test('runEnter: workflowEntry false — does not mark the workflow entered', () => {
+  process.env.AI_WORKFLOW_APP_BIN = writeStub(tmpDir, 0)
+
+  runEnter(undefined, 'conversation', 'Q?', undefined, undefined, false, undefined, false)
+
+  assert.equal(loadWorkflowState(rawId), null)
+  const register = readCalls(tmpDir).find((c) => c.startsWith('session register'))
+  assert.ok(register?.includes('--phase conversation'), 'registered in the conversation phase')
+})
+
+test('runEnter: a conversation node can be named by the first workflow enter without --retitle', () => {
+  process.env.AI_WORKFLOW_APP_BIN = writeStub(tmpDir, 0)
+
+  runEnter(undefined, 'conversation', 'Q?', undefined, undefined, false, undefined, false)
+  runEnter(undefined, 'debugging', 'Real title')
+
+  const registers = readCalls(tmpDir).filter((c) => c.startsWith('session register'))
+  assert.equal(registers.length, 2)
+  assert.ok(registers[1]!.includes('--title Real title'))
+})

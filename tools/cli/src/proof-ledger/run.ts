@@ -27,6 +27,7 @@ import {
   type ProofLedger,
 } from './ledger.ts'
 import { describeExecError, GIT_MAX_BUFFER_BYTES } from './git-exec.ts'
+import { checkSlices, listBranchCommits } from './slices.ts'
 
 // The run layer. Every command prints JSON on stdout, exactly as gate-ledger/run.ts does. Exit
 // codes:
@@ -45,17 +46,22 @@ import { describeExecError, GIT_MAX_BUFFER_BYTES } from './git-exec.ts'
 //       matches the digest recorded at capture time, or an output sidecar digest shared with another
 //       capture at the same (task, sha) — of any kind, not just this one — that asserts a different
 //       exitStatus: at most one exit status can be true of one fixed output, so every capture sharing
-//       that digest is invalid, not just whichever one is being read.
-//   4 — `check`: the ledger has one or more lines it could not parse (`skippedLines > 0`). A skipped
-//       line could have been the very `red` or `green` this check's `required` set is derived from —
-//       gate-ledger's required set comes from a manifest external to its ledger, so a corrupt line
-//       there degrades to a `missing` gate (safe); this ledger's required set is computed FROM the
-//       ledger's own content, so without this exit a corrupt line degrades to "not required" instead
-//       (unsafe — it would let a truncated ledger read as compliant). 4 is distinct from 3: 3 means
-//       "the readable content is not enough", 4 means "the ledger cannot be trusted to say what
-//       content it holds", and 4 always wins — it fires regardless of what `missing`/`failing` would
-//       otherwise report.
-//   6 — `record` with a `--sha` that does not resolve to a commit in `--repo-root` — checked for
+//       that digest is invalid, not just whichever one is being read. `check --slices`: at least one
+//       named slice reads `missing`, `failing`, `out-of-order` or `late`.
+//   4 — `check` and `check --slices`: the ledger has one or more lines it could not parse
+//       (`skippedLines > 0`). A skipped line could have been the very `red` or `green` this check's
+//       `required` set is derived from — gate-ledger's required set comes from a manifest external
+//       to its ledger, so a corrupt line there degrades to a `missing` gate (safe); this ledger's
+//       required set is computed FROM the ledger's own content, so without this exit a corrupt line
+//       degrades to "not required" instead (unsafe — it would let a truncated ledger read as
+//       compliant). 4 is distinct from 3: 3 means "the readable content is not enough", 4 means
+//       "the ledger cannot be trusted to say what content it holds", and 4 always wins — it fires
+//       regardless of what `missing`/`failing` would otherwise report.
+//   6 — `check` from runCheckCommand: `--slices` together with `--task`, `--require` or
+//       `--expect-command`; neither mode named (no `--slices`, and `--task` or `--require` absent);
+//       `--repo-root` without `--slices`. `check --slices` from runCheckSlices: `origin/main..--sha`
+//       does not resolve in `--repo-root`.
+//       `record` with a `--sha` that does not resolve to a commit in `--repo-root` — checked for
 //       every capture kind, including `--sha-is-label`, since the label exempts a capture from the
 //       tree-content checks below, never from `--sha` naming a real commit at all; `record
 //       --capture red` with no `--mutation-file`, with one whose content isn't a recognisable
@@ -97,6 +103,11 @@ import { describeExecError, GIT_MAX_BUFFER_BYTES } from './git-exec.ts'
 //       `origin/main` changes at `--sha`, with a found path in its output outside every `--scope`
 //       dir, or when `origin/main` cannot be resolved to compute that; `--scope` on any capture kind
 //       but sweep, or with `--sha-is-label` — a label sweep reads no tree and carries no scope; or
+//       `record --mutation-file` on any capture kind but red; `record --capture red` while the
+//       working tree has uncommitted changes outside the files its own `--mutation-file` names, or
+//       with a `--mutation-file` that has no section resolvable to a file; `record --capture slice`
+//       with `--sha-is-label` — a slice check certifies the tree at the commit that completes the
+//       slice, so `--sha` cannot be only a label; or
 //       `record` with a --command too large to fit the ledger line budget
 //       even with --note and the output tail fully shrunk to nothing (--command is never shrunk to
 //       make room — see line-budget.ts — so this is a refusal, not a silent divergence between what
@@ -199,6 +210,17 @@ export const runRecord = (
           'half of a red baseline, a run made against the tree at --sha, so a --command that never ' +
           'read the tree leaves nothing for --sha-is-label to describe — --sha names the tree a ' +
           'green must certify, not a commit it is free to merely label',
+      })
+      setRequestedExitCode(6)
+      return
+    }
+
+    if (shaIsLabel && capture === 'slice') {
+      writeJson({
+        error:
+          '--sha-is-label cannot be declared on a slice capture: a slice check drives the slice ' +
+          'through its entry point at the commit that completes it, so --sha names the tree it ' +
+          'certifies, not a commit it is free to merely label',
       })
       setRequestedExitCode(6)
       return
@@ -585,6 +607,112 @@ export const runShow = (
         (id === undefined || c.id === id)
     )
     writeJson({ ticket, captures, skippedLines: ledger.skippedLines })
+  })
+
+// `check` runs one of two checks: one task's coverage (--task with --require) or a plan's slice
+// order (--slices). Flags of the other check are refused rather than ignored, and no missing flag is
+// inferred.
+export const runCheckCommand = (
+  repoRoot: string | undefined,
+  ticket: string,
+  sha: string,
+  flags: {
+    task: string | undefined
+    required: CaptureKind[] | undefined
+    expectCommands: ExpectedCommand[]
+    slices: string[] | undefined
+  }
+): void =>
+  runGuarded(() => {
+    if (flags.slices !== undefined) {
+      if (
+        flags.task !== undefined ||
+        flags.required !== undefined ||
+        flags.expectCommands.length > 0
+      ) {
+        writeJson({
+          error:
+            "--slices checks a plan's slice order and takes no --task, --require or " +
+            "--expect-command: run a task's coverage check as its own call",
+        })
+        setRequestedExitCode(6)
+        return
+      }
+
+      runCheckSlices(repoRoot ?? process.cwd(), ticket, sha, flags.slices)
+      return
+    }
+
+    if (repoRoot !== undefined) {
+      writeJson({
+        error:
+          "--repo-root is read only by --slices: a task's coverage check reads the ledger alone",
+      })
+      setRequestedExitCode(6)
+      return
+    }
+
+    if (flags.task === undefined || flags.required === undefined) {
+      const missing = [
+        ...(flags.task === undefined ? ['--task'] : []),
+        ...(flags.required === undefined ? ['--require'] : []),
+      ]
+      writeJson({
+        error:
+          `check needs ${missing.join(' and ')}, or --slices: --require has no default, since ` +
+          'the kinds a task needs cannot be inferred from its name',
+      })
+      setRequestedExitCode(6)
+      return
+    }
+
+    runCheck(ticket, sha, flags.task, flags.required, flags.expectCommands)
+  })
+
+// The order half of skills/workflow-guide/references/routing.md §Cross-Phase Rule: Work Is Planned
+// in Vertical Slices: every slice's check recorded, in plan order, before the next slice began.
+// Whether each slice is vertical is the senior's judgement, not this command's.
+export const runCheckSlices = (
+  repoRoot: string,
+  ticket: string,
+  sha: string,
+  slices: string[]
+): void =>
+  runGuarded(() => {
+    const commits = listBranchCommits(repoRoot, sha)
+
+    if (commits === null) {
+      writeJson({
+        error:
+          `origin/main..${sha} does not resolve in ${repoRoot}: --sha must name a commit there and ` +
+          'origin/main must exist — pass --repo-root pointing at the repo the branch belongs to',
+      })
+      setRequestedExitCode(6)
+      return
+    }
+
+    const ledger = readProofLedger(ticket)
+    const invalidReason = (c: ProofCaptureEvent): string | undefined =>
+      outputDigestConflicts(ledger, c.task, c.sha).get(c.id) ?? captureInvalidReason(c)
+    const rows = checkSlices(ledger, slices, commits, invalidReason)
+    const corrupted = ledger.skippedLines > 0
+
+    writeJson({
+      ticket,
+      sha,
+      slices: rows,
+      skippedLines: ledger.skippedLines,
+      ...(corrupted ? { corrupted: true } : {}),
+    })
+
+    if (corrupted) {
+      setRequestedExitCode(4)
+      return
+    }
+
+    if (rows.some((row) => row.state !== 'ok')) {
+      setRequestedExitCode(3)
+    }
   })
 
 export const runCheck = (

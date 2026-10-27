@@ -56,6 +56,10 @@ export class DashboardEnterRefusal extends Error {}
  * creating is guidance the skills carry at each call site (FLOW-205). Three prior attempts to make
  * the CLI adjudicate this (FLOW-125, FLOW-123, FLOW-180) each shipped a rule the next round of
  * defects walked around.
+ *
+ * `workflowEntry: false` (used only by `item add`'s automatic conversation node) skips the workflow
+ * marker and records no local title, so `assertNotSilentRetitle` fails open on the node and the
+ * first workflow enter can name it without `--retitle`.
  */
 export const runEnter = (
   key: string | undefined,
@@ -64,7 +68,8 @@ export const runEnter = (
   parentKey?: string,
   session?: string,
   retitle = false,
-  parentSession?: string
+  parentSession?: string,
+  workflowEntry = true
 ): void => {
   // Argument validation happens BEFORE the marker write: invalid args must never grant edit
   // rights via a marker that gets written and then the call throws (FLOW-147).
@@ -131,7 +136,9 @@ export const runEnter = (
       retitle
     )
   }
-  if (earlyRawId !== null) markWorkflowEntered(earlyRawId, { phase, key, via: 'dashboard-enter' })
+  if (earlyRawId !== null && workflowEntry) {
+    markWorkflowEntered(earlyRawId, { phase, key, via: 'dashboard-enter' })
+  }
   if (!dashboardAvailable()) return
   let rawId: string
   try {
@@ -270,9 +277,11 @@ export const runEnter = (
     externalId,
     key: key ?? null,
     parentId: nodeParentId,
-    // Title tracks what the board now holds: the value we just sent when we sent one, otherwise
-    // whatever was already recorded (FLOW-180).
-    title: title ?? existingNode?.title,
+    // With workflowEntry, the title just sent, else the one already recorded (FLOW-180). Without
+    // it, only the one already recorded: a new automatic conversation node records none, so the
+    // first workflow enter can name it without --retitle (assertNotSilentRetitle fails open on an
+    // untitled node).
+    title: workflowEntry ? (title ?? existingNode?.title) : existingNode?.title,
   })
   const existing = loadState(nodeId)
   // Preserve any already-tracked open items on re-entry — a fresh node has none; re-entering

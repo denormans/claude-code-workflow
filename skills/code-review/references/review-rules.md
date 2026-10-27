@@ -1,7 +1,7 @@
 # Code Review — Rules
 
 The rules a diff must satisfy. Read by the implementer before reporting a task complete
-(`agents/implementer.md` item 8) and by the senior engineer at review time
+(`agents/implementer.md` item 9) and by the senior engineer at review time
 (`skills/code-review/SKILL.md` steps 3–5). Reviewer procedure — stance, delta scoping, the re-arming
 predicate, work-type detection, parallelized review — lives in `checklist.md`.
 
@@ -25,7 +25,8 @@ Check **every item**. Every issue blocks approval — except a routed line, whic
 - [ ] When the architecture doc specifies similar changes across multiple repos, verify patterns match across all of them
 
 ### Architecture Compliance
-- [ ] Implementation matches the contracts in the architecture doc
+- [ ] Implementation matches the contracts in the first document that settles them, in the order `skills/workflow-guide/references/routing.md` §Cross-Phase Rule: Which Document Wins gives
+- [ ] **The plan was built in vertical slices** (`skills/workflow-guide/references/routing.md` §Cross-Phase Rule: Work Is Planned in Vertical Slices). Whether the branch has had its first push decides which applies: run `git ls-remote --exit-code origin "refs/heads/<branch>"`. Exit 2 (no such remote branch) means it has not. Run `proof-ledger check --ticket "<TICKET-ID>" --sha "<the pinned sha>" --slices "<the plan's slice task names, in plan order>"`. Exit 0 means it has: the first push squashed the branch (`skills/pr-lifecycle/SKILL.md` step 2), so the slices' commits are no longer on it and every row would read `missing`. Read the `slice-order` evidence capture recorded before that push instead, and do not re-run the check. Any other exit means the remote could not be read. That is not an answer either way, so fix the remote and run it again before choosing. A row other than `ok` that carries a `captureId` (`failing`, `out-of-order` or `late`) is a finding, filed `--check <that captureId>`. A `missing` row with no `captureId` has no capture to cite: report it to the team lead as an incomplete record. Then open each slice's `slice` capture: one whose command only typechecks, lints or runs a unit test, or never drives the slice's entry point, does not support the slice's claim and is a finding, filed `--check <its id>` — this is how a plan ordered by layer fails review, whatever its slices are titled.
 - [ ] Data structures match the defined shapes
 - [ ] API contracts match (endpoints, request/response shapes, error cases)
 - [ ] No architectural drift — if the implementation deviated, was it justified and documented? "Documented" means the design doc itself was updated to match, not merely explained in a PR comment — see **Keep the PR's Written Artifacts True** in `skills/pr-lifecycle/SKILL.md`. A design doc updated to match a deliberate, reviewer-driven change is the expected outcome, not a finding.

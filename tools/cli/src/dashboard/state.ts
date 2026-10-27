@@ -87,6 +87,9 @@ export interface DashboardSessionState {
   deferredIdCounter?: number
 }
 
+// The phase of a root node that `item add` opened for a session no workflow entered (FLOW-439).
+export const CONVERSATION_PHASE = 'conversation'
+
 export const hashId = (sessionId: string): string =>
   createHash('sha256').update(sessionId).digest('hex')
 

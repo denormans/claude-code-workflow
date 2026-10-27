@@ -76,9 +76,10 @@ allowed to make reviewable.
 ### The artifacts no gate reads
 
 Nothing mechanical checks what anything this workflow writes under `docs/plans/` in the parent
-workspace says: the PRD (`-1-prd.md`), the architecture doc (`-2-arch.md`), the bug summary
-(`-1-bug.md`), the change summary (`-1-change.md`), the implementation plan (`-3-impl.md`), the
-ticket's proofs file, and the process-improvement notes. That directory is gitignored — so they are
+workspace says: the PRD (`-1-prd.md`), the current-state research doc (`-1-research.md`), the
+architecture doc (`-2-arch.md`), the bug summary (`-1-bug.md`), the change summary
+(`-1-change.md`), the implementation plan (`-3-impl.md`), the ticket's proofs file, and the
+process-improvement notes. That directory is gitignored — so they are
 in no diff, no commit, no `check-refs` pass and no CI run, and nothing that reads git can reach
 them. The mechanical reads they do get check no sentence: `validate-mermaid` parses a design
 document's fenced `mermaid` blocks and `render-diagrams` compiles its fenced `d2` blocks before it is
@@ -89,8 +90,8 @@ copy on one machine would be a gate whose coverage depended on whose machine ran
 
 That none of them is checked does not separate any of them from the others, so it is not what
 decides how a defect in one is handled. §What Is In Scope decides it, by class. The PRD, the
-architecture doc, the bug and change summaries, and the process-improvement notes are **outside**:
-never a target. A diff that disagrees with its design document is a finding against the diff
+research doc, the architecture doc, the bug and change summaries, and the process-improvement notes
+are **outside**: never a target. A diff that disagrees with its design document is a finding against the diff
 (*Architecture compliance*), and a design document that is wrong about something the diff does not
 touch is a process note. The implementation plan and the proofs file are **checks**: a row in one is
 filed only with `--check`, and only when the capture or gate it cites does not support it — a
@@ -1242,7 +1243,7 @@ not a contradiction of an earlier pass that found none.
 Read and understand these artifacts:
 - **The PRD** — what problem is being solved, success criteria, scope
 - **The architecture doc** — contracts, data structures, key decisions, sequencing
-- **The implementation plan** — what was intended to be built, task breakdown
+- **The implementation plan** — what was intended to be built, and its slices in build order (`skills/workflow-guide/references/routing.md` §Cross-Phase Rule: Work Is Planned in Vertical Slices)
 - **The project's CLAUDE.md** — project-specific standards and conventions
 - **The user review standards** — the absolute path the team lead passed, read additively with a per-repo `<repo-root>/.claude/review-standards.md` if it exists. Every rule there is a blocking checklist item for this review (`review-rules.md` §User Review Standards). Three states, not two: no path was passed — say so in your review report; a path was passed and the file exists but is empty — a no-op, nothing to enforce yet; a path was passed and the file is missing or unreadable — say so in your review report exactly as for no path passed, never treat it as a no-op.
 - **The review ledger** (required when the ledger is present; no-ops only if the `review-ledger` CLI is absent) — `review-ledger show --ticket "<TICKET-ID>"` gives your round number, the findings still `open`, the ones `fixed` and their commit, and the ones `withdrawn` with the reason (`agents/senior-engineer.md` §How You Work step 3).

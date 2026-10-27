@@ -11,7 +11,7 @@ When the user gives you a task:
 3. **Is it substantial new work — a new feature, a multi-story epic, or anything with real design space to explore?** → Use JTBD (`workflow:jtbd`) to understand the problem first; it chains into Architecture.
 4. **Is it a small, well-understood change that isn't a bug?** (a tweak, small enhancement, refactor, or copy/config edit that follows an existing pattern) → Use Quick Change (`workflow:quick-change`). It writes one combined change summary doc and chains into Team Dispatch. If scoping reveals real design space, it escalates to JTBD/Architecture.
 5. **Is the user asking to set up a workspace?** → Use Git Worktrees (`workflow:git-worktrees`)
-6. **None of the above?** → Proceed normally, no skill needed. (But writing documentation or editing code is never "none of the above" — that is a change, so route it via Quick Change / Systematic Debugging / JTBD.)
+6. **None of the above?** → Proceed normally, no skill needed. Anything you need from the user still goes on the board (contract rule 2): `dashboard item add` opens this session's board node itself, in the `conversation` phase, when no skill has entered one. (But writing documentation or editing code is never "none of the above" — that is a change, so route it via Quick Change / Systematic Debugging / JTBD.)
 
 ## Dashboard Session Nesting
 
@@ -59,6 +59,8 @@ When you need to investigate the codebase to answer a question, prefer delegatin
 - The specific question (not "explore this area")
 - Any files or symbols you already know are relevant, as starting points
 - What the answer will be used for (design decision, bug diagnosis, etc.) — helps it pick the right level of detail
+
+**The current-state researcher is the exception.** Architecture's current-state research hands `workflow:current-state-researcher` its questions and nothing else — not what the answers are for — so its findings describe the code rather than the plan (`skills/architecture/references/architecture-reference.md` §Current-State Research). Everywhere else, pass the purpose as above.
 
 **What comes back:** a concise summary citing symbols — or a quoted literal where no symbol exists — with `file:line` beside them. Use it directly; don't re-investigate the same ground — and keep the symbol (or literal) when you copy a finding into a plan or doc, which outlives the line numbers (`skills/workflow-guide/references/durable-references.md`).
 
@@ -280,6 +282,77 @@ Nothing else is written to Jira: no other comment, and no section appended to a 
 evidence gathered mid-story, not a correction to the ticket as filed, not a decision, not a note
 "recorded here so this ticket does not re-derive it". A finding worth keeping goes in the local
 record.
+
+## Cross-Phase Rule: Which Document Wins
+
+**One order settles a disagreement between workflow documents.** A skill,
+agent or command that reads more than one of them cites this section instead of stating an order of
+its own.
+
+**On a decision about what to build or how, follow the first document in this list that settles it:**
+
+1. The implementation plan (`-3-impl.md`).
+2. The architecture doc (`-2-arch.md`) — or, on the paths that write one in place of a PRD and an
+   architecture doc, the bug summary (`-1-bug.md`) or the change summary (`-1-change.md`).
+3. The current-state research doc (`-1-research.md`).
+4. The PRD (`-1-prd.md`).
+5. The ticket.
+
+**A document higher in this list does not settle what an approved doc below it decided.** Departing
+from what an approved doc decided is the user's, under bright line 4 in
+`skills/board/references/escalation-contract.md` §The bright lines — what is genuinely the user's,
+which names the approved docs. Until the user decides, the approved doc's decision is the one that
+holds; once they decide, the document that recorded the earlier decision is updated to match.
+
+**On how the code behaves today, the live code wins over every document.** A document that gets
+today's behaviour wrong — a premise, a design assumption, a plan step — is never worked around, by
+code written to match it or by another document that quietly differs. The team lead corrects the
+plan and the design docs; a ticket's description changes only as *Jira Is the Ticket, Not the
+Working Record* above allows. An implementer that finds one reports it to the team lead; a reviewer
+routes it as `skills/code-review/references/checklist.md` §The artifacts no gate reads says. When
+the correction changes a decision in an approved doc, the user decides it first, as above.
+
+**Which work remains is tracked, not decided, and this order does not apply to it.** Team Cleanup
+derives the remaining stories as `skills/team-cleanup/SKILL.md` step 1 says.
+
+## Cross-Phase Rule: Work Is Planned in Vertical Slices
+
+**A slice is the unit a plan is built and proven in.** Team Dispatch's implementation plan breaks a
+story into ordered slices, and an architecture doc's story list breaks an epic the same way, one
+level up. A skill, agent or command that writes, works or reviews a plan cites this section instead
+of restating it.
+
+**A slice delivers one observable result through the real entry point.** Its title names that
+result ("a refused enter names the fix"), never a layer ("add the type", "write the tests"), and it
+lists every layer it touches, from the entry point to storage. A plan whose first slice holds the
+types, the next the logic and the last the wiring is ordered by layer, however its slices are
+titled.
+
+**Every slice states its check: the command that drives it from its entry point, and what that
+command must show** — a CLI call, a hook run, a skill scenario. A typecheck, a lint run or a unit
+test alone is not a slice check, since each proves one layer rather than the result. A slice that
+changes only prose has no runtime entry point: its check is a sweep showing that every document
+reading the changed rule now states it, and the plan says so.
+
+**A slice's check runs, and is recorded, before the next slice's first commit.** The implementer
+records it as a `slice` capture under the slice's task name, at the commit that completes the slice
+(`agents/implementer.md` §How You Work).
+`proof-ledger check --ticket "<TICKET-ID>" --sha "<sha>" --slices "<slice-1>,<slice-2>,…"` reads
+those captures in plan order against the branch's commits and reports each slice `ok`, `missing` (no
+capture on a commit of the branch), `failing` (a capture on a commit of the branch is invalid, even
+beside a later valid one), `out-of-order` (its capture's commit is not after the previous slice's)
+or `late` (the commit after its capture was made before the capture was recorded). It checks
+order, never verticality — no tool can tell a vertical slice from a layer, so the senior judges
+that (`skills/code-review/references/review-rules.md` §Universal Review Checklist). It reads the
+branch's own commits, so it runs before the first push, which squashes them
+(`skills/pr-lifecycle/SKILL.md` step 2), and a rebase before then reads every earlier capture
+`missing`.
+
+**A story is a slice one level up.** Each story in an architecture doc delivers an observable result
+through the real entry points, never one layer of the epic. A foundation story, the new
+infrastructure later stories need, meets this rule when it is deployed and checked end to end in the
+target environment (`skills/architecture/references/architecture-reference.md` §Architecture Doc
+Template).
 
 ## Important
 

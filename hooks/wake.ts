@@ -16,7 +16,8 @@ const CHECK_TIMEOUT_MS = 120_000
 // a beat must mean the agent is doing something (FLOW-321). The board marks a session hung after
 // 60 minutes without one.
 const BEAT_INTERVAL_MS = 300_000
-// `dashboard session heartbeat` invokes the board once per live leaf, 5s each.
+// `dashboard session heartbeat` invokes the board once per live leaf, 5s each, plus one
+// `session list` read for each leaf marked paused.
 const BEAT_TIMEOUT_MS = 30_000
 // `mailbox check` exits 0 on a complete read and 3 on a partial one: there is no board binary, a board
 // read failed or its output was unparseable, or the registry was unreadable, so the answers listed

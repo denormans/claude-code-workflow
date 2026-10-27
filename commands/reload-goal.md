@@ -19,7 +19,7 @@ Do the following now:
 
 3. **Re-read the in-flight plan.** Open the matching implementation plan (`docs/plans/*-3-impl.md` for the same topic, or the bug/change summary doc) and re-read the current story's scope and remaining tasks.
 
-4. **Restate.** In your own words, say (a) the North Star — the real goal and the bar — and (b) where the current work stands against it and what's left. If you'd drifted, name the correction.
+4. **Restate.** In your own words, say (a) the North Star — the real goal and the bar — and (b) where the current work stands against it and what's left. If you'd drifted, name the correction. If the PRD and the plan disagree, `skills/workflow-guide/references/routing.md` §Cross-Phase Rule: Which Document Wins says which one holds.
 
 ## Note
 

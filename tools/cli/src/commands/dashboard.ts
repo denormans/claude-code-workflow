@@ -17,7 +17,14 @@ import {
 } from '../dashboard/item.ts'
 import { runItemShow } from '../dashboard/show.ts'
 import type { WhyMine } from '../dashboard/state.ts'
-import { runHeartbeat, runEnd, runLeave, runLinkAdd } from '../dashboard/lifecycle.ts'
+import {
+  runHeartbeat,
+  runPause,
+  runResume,
+  runEnd,
+  runLeave,
+  runLinkAdd,
+} from '../dashboard/lifecycle.ts'
 import { runReadAnswers, runReadComments } from '../dashboard/read.ts'
 import { runStatus } from '../dashboard/status.ts'
 import { runRepair } from '../dashboard/repair.ts'
@@ -53,6 +60,31 @@ const heartbeatCommand = buildCommand({
   },
   func(flags: { session?: string }) {
     runHeartbeat(flags.session)
+  },
+})
+
+const pauseCommand = buildCommand({
+  docs: {
+    brief:
+      'Set the current node aside on the dashboard until `session resume` or other agent activity',
+  },
+  parameters: {
+    flags: { key: keyFlag, session: sessionFlag },
+    positional: { kind: 'tuple', parameters: [] },
+  },
+  func(flags: { key?: string; session?: string }) {
+    runPause(flags.session, flags.key)
+  },
+})
+
+const resumeCommand = buildCommand({
+  docs: { brief: 'Return a paused node to active on the dashboard' },
+  parameters: {
+    flags: { key: keyFlag, session: sessionFlag },
+    positional: { kind: 'tuple', parameters: [] },
+  },
+  func(flags: { key?: string; session?: string }) {
+    runResume(flags.session, flags.key)
   },
 })
 
@@ -292,6 +324,8 @@ const sessionRoutes = buildRouteMap({
     'refresh-return': refreshReturnCommand,
     leave: leaveCommand,
     heartbeat: heartbeatCommand,
+    pause: pauseCommand,
+    resume: resumeCommand,
     end: endCommand,
     status: statusCommand,
     repair: repairCommand,
@@ -702,6 +736,7 @@ export const dashboardRoutes = buildRouteMap({
     comments: commentsCommand,
   },
   docs: {
-    brief: 'Dashboard session tracking: register, update phase, heartbeat, end, and link sessions',
+    brief:
+      'Dashboard session tracking: register, update phase, heartbeat, pause, end, and link sessions',
   },
 })

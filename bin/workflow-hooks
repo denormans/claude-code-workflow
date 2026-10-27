@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# `run` fires around every gate and test run (tests.before / tests.after), and starting node is slow enough
+# to matter on every call site. With no hooks file at any level there is nothing to run, so answer
+# here without node. The three paths mirror locate() in tools/cli/src/workflow-hooks/main.ts: the
+# user file under CLAUDE_CONFIG_DIR (else ~/.claude), and the project files under the MAIN
+# checkout, or the current directory outside git. Only the forms the call sites use are answered
+# here: `run`, then `--moment <id>` with a known id and, each at most once, `--ticket <value>`,
+# `--pr <value>` and `--tests-outcome pass|fail`, all as separate words, no value starting with
+# `-`. With no hooks file, the fast path answers only the forms above and hands every other `run`
+# argument vector to the full CLI, so a `run` gets the exit code and stdout that a hooks file
+# configuring no step for the moment would give.
+fast_path_answer() {
+  shift
+  local moment="" seen=" "
+  while [ "$#" -gt 0 ]; do
+    local flag="$1"
+    if [ "$#" -lt 2 ]; then
+      return 1
+    fi
+    local value="$2"
+    case "$value" in
+      -*) return 1 ;;
+    esac
+    case "$seen" in
+      *" $flag "*) return 1 ;;
+    esac
+    seen="$seen$flag "
+    case "$flag" in
+      --moment) moment="$value" ;;
+      --ticket | --pr) ;;
+      --tests-outcome)
+        case "$value" in
+          pass | fail) ;;
+          *) return 1 ;;
+        esac
+        ;;
+      *) return 1 ;;
+    esac
+    shift 2
+  done
+  case "$moment" in
+    prd.before | prd.after | architecture.before | architecture.after | \
+      change-summary.before | change-summary.after | bug-summary.before | bug-summary.after | \
+      work-start.after | team-start.before | team-start.after | tests.before | tests.after | \
+      pr-opened.after | pr-ready.before | pr-ready.after | pr-human-review.after | \
+      pr-merged.after | cleanup.before | cleanup.after)
+      printf '{"moment":"%s","ran":[],"instructions":[]}\n' "$moment"
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+if [ "${1:-}" = "run" ]; then
+  config_dir="${CLAUDE_CONFIG_DIR:-${HOME:-}/.claude}"
+  project_root="$PWD"
+  common_dir="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+  if [ -n "$common_dir" ] && [ "$(basename "$common_dir")" = ".git" ]; then
+    project_root="$(dirname "$common_dir")"
+  fi
+  if [ ! -e "$config_dir/workflow-hooks.json" ] &&
+    [ ! -e "$project_root/.claude/workflow-hooks.json" ] &&
+    [ ! -e "$project_root/.claude/workflow-hooks.local.json" ]; then
+    if fast_path_answer "$@"; then
+      exit 0
+    fi
+  fi
+fi
+
+exec node --experimental-transform-types "${SCRIPT_DIR}/tools/cli/src/main.ts" workflow-hooks "$@"

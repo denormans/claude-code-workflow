@@ -20,6 +20,10 @@ export interface RegistryNode {
   // title, and the check that reads it fails open rather than erroring on an existing session.
   // A `level` recorded by a pre-FLOW-205 registry is simply never read (excess JSON keys parse fine).
   title?: string
+  // FLOW-445: set by `session pause`, so `session heartbeat` reads the board before beating this
+  // node instead of resuming it. Absent means not paused: `session resume` clears it, and a
+  // re-enter rewrites the node without it.
+  paused?: boolean
 }
 
 const registryName = (rawSessionId: string): string =>
@@ -88,9 +92,9 @@ export const loadRegistry = (rawSessionId: string): RegistryNode[] => {
 const isRegistryNodeArray = (value: unknown): value is RegistryNode[] =>
   Array.isArray(value) && value.every(isRegistryNode)
 
-// Checks the five fields the interface names and no more. Excess keys pass deliberately — a
-// `level` recorded by a pre-FLOW-205 registry parses fine and is never read — and `title` is
-// optional here for the same back-compat reason the interface marks it so.
+// Checks the six fields the interface names and no more. Excess keys pass deliberately — a
+// `level` recorded by a pre-FLOW-205 registry parses fine and is never read — and `title` and
+// `paused` are optional here for the same back-compat reason the interface marks them so.
 const isRegistryNode = (value: unknown): value is RegistryNode => {
   if (typeof value !== 'object' || value === null) return false
   const node = value as Record<string, unknown>
@@ -99,7 +103,8 @@ const isRegistryNode = (value: unknown): value is RegistryNode => {
     typeof node.externalId === 'string' &&
     (typeof node.key === 'string' || node.key === null) &&
     (typeof node.parentId === 'string' || node.parentId === null) &&
-    (node.title === undefined || typeof node.title === 'string')
+    (node.title === undefined || typeof node.title === 'string') &&
+    (node.paused === undefined || typeof node.paused === 'boolean')
   )
 }
 
@@ -115,6 +120,21 @@ export const removeRegistryNode = (rawSessionId: string, internalId: string): vo
   saveRegistry(
     rawSessionId,
     loadRegistry(rawSessionId).filter((n) => n.internalId !== internalId)
+  )
+}
+
+// A no-op when `internalId` names no registry node. Clearing writes `paused: undefined`, which
+// JSON.stringify drops, so a cleared node reads back exactly like one never paused.
+export const setRegistryNodePaused = (
+  rawSessionId: string,
+  internalId: string,
+  paused: boolean
+): void => {
+  saveRegistry(
+    rawSessionId,
+    loadRegistry(rawSessionId).map((n) =>
+      n.internalId === internalId ? { ...n, paused: paused ? true : undefined } : n
+    )
   )
 }
 

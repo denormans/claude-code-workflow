@@ -1,8 +1,13 @@
 import { readFileSync } from 'node:fs'
 import { buildCommand, buildRouteMap } from '@stricli/core'
 import { parseNonBlankString } from '../parse.ts'
-import type { CaptureKind, ExpectedCommand } from '../proof-ledger/ledger.ts'
-import { runRecord, runShow, runCheck, runGuarded } from '../proof-ledger/run.ts'
+import {
+  CAPTURE_KINDS,
+  isCaptureKind,
+  type CaptureKind,
+  type ExpectedCommand,
+} from '../proof-ledger/ledger.ts'
+import { runRecord, runShow, runCheckCommand, runGuarded } from '../proof-ledger/run.ts'
 
 const ticketFlag = {
   kind: 'parsed' as const,
@@ -27,8 +32,10 @@ const parseFullSha =
   (flagName: string) =>
   (value: string): string => {
     const trimmed = parseNonBlankString(flagName)(value)
-    if (!/^[0-9a-f]{40}$/.test(trimmed))
+    if (!/^[0-9a-f]{40}$/.test(trimmed)) {
       throw new Error(`${flagName} must be a full 40-character lowercase hex sha, got: ${trimmed}`)
+    }
+
     return trimmed
   }
 
@@ -45,14 +52,18 @@ const shaFlag = {
 const parseCaptureKind =
   (flagName: string) =>
   (value: string): CaptureKind => {
-    if (value !== 'sweep' && value !== 'red' && value !== 'green' && value !== 'evidence')
-      throw new Error(`${flagName} must be one of sweep, red, green, evidence, got: ${value}`)
+    if (!isCaptureKind(value)) {
+      throw new Error(`${flagName} must be one of ${CAPTURE_KINDS.join(', ')}, got: ${value}`)
+    }
+
     return value
   }
 
 const parseExitStatus = (value: string): number => {
-  if (!/^\d+$/.test(value.trim()))
+  if (!/^\d+$/.test(value.trim())) {
     throw new Error(`--exit must be a non-negative integer, got: ${value}`)
+  }
+
   return Number(value.trim())
 }
 
@@ -64,24 +75,46 @@ const parseScope = (value: string): string[] => {
     .split(',')
     .map((piece) => piece.trim())
     .filter((piece) => piece.length > 0)
-  if (dirs.length === 0) throw new Error(`--scope must name at least one dir, got: ${value}`)
+  if (dirs.length === 0) {
+    throw new Error(`--scope must name at least one dir, got: ${value}`)
+  }
+
   return dirs
 }
 
+const parseSlices = (value: string): string[] => {
+  const slices = value.split(',').map((piece) => piece.trim())
+
+  if (slices.some((slice) => slice.length === 0)) {
+    throw new Error(`--slices must name each slice task, comma-separated, got: ${value}`)
+  }
+  if (new Set(slices).size !== slices.length) {
+    throw new Error(`--slices must name each slice task once, got: ${value}`)
+  }
+
+  return slices
+}
+
 // "<kind>:<command>" — split on the FIRST colon only, since the command half routinely contains its
-// own colons (a path, a flag value). The kind half must be one of the four known kinds; there is no
-// fifth kind an expected command could name.
+// own colons (a path, a flag value). The kind half must be one of `CAPTURE_KINDS`.
 const parseExpectedCommand = (value: string): ExpectedCommand => {
   const idx = value.indexOf(':')
-  if (idx <= 0) throw new Error(`--expect-command must be "<kind>:<command>", got: ${value}`)
+  if (idx <= 0) {
+    throw new Error(`--expect-command must be "<kind>:<command>", got: ${value}`)
+  }
+
   const kindPart = value.slice(0, idx)
-  if (kindPart !== 'sweep' && kindPart !== 'red' && kindPart !== 'green' && kindPart !== 'evidence')
+  if (!isCaptureKind(kindPart)) {
     throw new Error(
-      `--expect-command kind must be one of sweep, red, green, evidence, got: ${kindPart}`
+      `--expect-command kind must be one of ${CAPTURE_KINDS.join(', ')}, got: ${kindPart}`
     )
+  }
+
   const command = value.slice(idx + 1).trim()
-  if (command.length === 0)
+  if (command.length === 0) {
     throw new Error(`--expect-command command half must not be blank, got: ${value}`)
+  }
+
   return { kind: kindPart, command }
 }
 
@@ -97,7 +130,7 @@ const recordCommand = buildCommand({
       capture: {
         kind: 'parsed',
         parse: parseCaptureKind('--capture'),
-        brief: 'Capture kind: sweep, red, green, or evidence',
+        brief: 'Capture kind: sweep, red, green, evidence, or slice',
         optional: false,
       },
       sha: shaFlag,
@@ -192,10 +225,14 @@ const recordCommand = buildCommand({
     runGuarded(() => {
       const outputFile = flags['output-file']
       const outputInline = flags.output
-      if (outputFile === undefined && outputInline === undefined)
+      if (outputFile === undefined && outputInline === undefined) {
         throw new Error('exactly one of --output-file or --output is required')
-      if (outputFile !== undefined && outputInline !== undefined)
+      }
+
+      if (outputFile !== undefined && outputInline !== undefined) {
         throw new Error('--output-file and --output are mutually exclusive')
+      }
+
       const output = outputFile !== undefined ? readFileSync(outputFile, 'utf-8') : outputInline!
 
       const mutationFile = flags['mutation-file']
@@ -262,19 +299,19 @@ const showCommand = buildCommand({
 const checkCommand = buildCommand({
   docs: {
     brief:
-      "Coverage check over the required capture kinds for a task at a sha — exits 3 if any required kind is missing or failing, or 4 if the ledger has a line it could not parse. --require is mandatory: name the kinds this task actually needs (sweep,evidence for a swept task; red,green for a guard/regression test; evidence alone for a sentinel task like repo-gates) — there is no default, since a fine-grained sub-proof task and its parent gate check need different kinds and the task name alone does not say which. Without --expect-command this checks presence per kind (one valid capture satisfies a kind), not count; name --expect-command to check that each expected capture under a kind exists individually. The required set can grow beyond --require and --expect-command from the ledger's own capture history for this task; there is no flag to disable that growth",
+      "Checks either one task's coverage or a plan's slice order. With --task and --require: coverage over the required capture kinds for that task at a sha — exits 3 if any required kind is missing or failing, or 4 if the ledger has a line it could not parse. --require has no default: name the kinds this task actually needs (sweep,evidence for a swept task; red,green for a guard/regression test; evidence alone for a sentinel task like repo-gates), since a fine-grained sub-proof task and its parent gate check need different kinds and the task name alone does not say which. Without --expect-command this checks presence per kind (one valid capture satisfies a kind), not count; name --expect-command to check that each expected capture under a kind exists individually. The required set can grow beyond --require and --expect-command from the ledger's own capture history for this task; there is no flag to disable that growth. With --slices instead: each named slice task, in the order given, must have at least one slice capture on a commit between origin/main and --sha and no invalid one there, its earliest after the previous slice's and recorded before the commit that follows it — exits 3 when any slice is missing, failing, out-of-order or late, 4 on an unparseable ledger line, 6 when origin/main..--sha does not resolve in --repo-root. A rebase rewrites the branch's commits, so a capture recorded before one reads missing. Mixing the two modes' flags, naming neither mode, or passing --repo-root without --slices, exits 6",
   },
   parameters: {
     flags: {
       ticket: ticketFlag,
       sha: shaFlag,
-      task: taskFlag,
+      task: { ...taskFlag, optional: true as const },
       require: {
         kind: 'parsed',
         parse: parseRequired,
         brief:
-          "Comma-separated capture kinds required, e.g. sweep,evidence or red,green — mandatory, since a fine-grained sub-proof task and a task's parent gate check need different kinds and there is no way to infer which from the task name alone. The effective set can grow beyond what is named here, from the ledger's own history for this task (a task that has ever recorded a red requires red at every future sha; a valid red at the checked sha also requires green). There is no flag to opt out of that growth. Recording red and green at two different shas satisfies neither check: red's cross-sha requirement makes every future sha require red once any sha has one, and green only joins the required set when a valid red exists AT THE SHA BEING CHECKED — so record both at the same sha, typically $(git rev-parse HEAD) for both, to see them read ok together. A missing row at a sha that never recorded the kind is a true statement, not noise",
-        optional: false,
+          "Comma-separated capture kinds required with --task, e.g. sweep,evidence or red,green — no default, since a fine-grained sub-proof task and a task's parent gate check need different kinds and there is no way to infer which from the task name alone. The effective set can grow beyond what is named here, from the ledger's own history for this task (a task that has ever recorded a red requires red at every future sha; a valid red at the checked sha also requires green). There is no flag to opt out of that growth. Recording red and green at two different shas satisfies neither check: red's cross-sha requirement makes every future sha require red once any sha has one, and green only joins the required set when a valid red exists AT THE SHA BEING CHECKED — so record both at the same sha, typically $(git rev-parse HEAD) for both, to see them read ok together. A missing row at a sha that never recorded the kind is a true statement, not noise",
+        optional: true,
       },
       'expect-command': {
         kind: 'parsed',
@@ -284,17 +321,38 @@ const checkCommand = buildCommand({
         brief:
           '"<kind>:<command>" naming one specific capture expected under that kind (repeatable) — without this, one valid capture satisfies a kind regardless of how many were expected',
       },
+      slices: {
+        kind: 'parsed',
+        parse: parseSlices,
+        optional: true,
+        brief:
+          "Comma-separated slice task names in the plan's order — checks the plan's slice order instead of one task's coverage, and takes no --task, --require or --expect-command",
+      },
+      'repo-root': {
+        kind: 'parsed',
+        parse: parseNonBlankString('--repo-root'),
+        optional: true,
+        brief:
+          "Repo the branch belongs to, for --slices' read of origin/main..--sha — defaults to cwd, and is refused without --slices",
+      },
     },
     positional: { kind: 'tuple', parameters: [] },
   },
   func(flags: {
     ticket: string
     sha: string
-    task: string
-    require: CaptureKind[]
+    task?: string
+    require?: CaptureKind[]
     'expect-command': ExpectedCommand[]
+    slices?: string[]
+    'repo-root'?: string
   }) {
-    runCheck(flags.ticket, flags.sha, flags.task, flags.require, flags['expect-command'])
+    runCheckCommand(flags['repo-root'], flags.ticket, flags.sha, {
+      task: flags.task,
+      required: flags.require,
+      expectCommands: flags['expect-command'],
+      slices: flags.slices,
+    })
   },
 })
 

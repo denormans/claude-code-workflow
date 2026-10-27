@@ -1,6 +1,7 @@
 import {
   resolveSessionId,
   resolveSessionTarget,
+  resolveSessionTargetOrRefuse,
   resolveLinkAddTarget,
   resolveRawSessionId,
   tryResolveRawSessionId,
@@ -12,6 +13,7 @@ import {
   registryLeaves,
   registryRoot,
   removeRegistryNode,
+  setRegistryNodePaused,
   isSessionExternalId,
   type RegistryNode,
 } from './registry.ts'
@@ -19,26 +21,41 @@ import { runItemWithdraw } from './item.ts'
 import { setRequestedExitCode } from '../runtime-exit-code.ts'
 import { ticketNodes } from './key.ts'
 import { resolveLeadSessionId } from './lead.ts'
+import { findBoardNodeFor } from './board-nodes.ts'
 
 // Heartbeat every live leaf of the caller's session and, when the caller is a teammate, every live
 // leaf of its lead's session — the backend's touchAncestors bumps the whole chain up from each, so a
 // `--key`-targeted sibling stays alive too. When the caller has no leaf, the single resolved session
 // is beaten instead (before first `enter`, or an explicit internal --session); a resolved session
-// that is only the bare session id is dropped when the lead has leaves to beat.
+// that is only the bare session id is dropped when the lead has leaves to beat. A leaf, of the
+// caller's or of its lead's, that `session pause` marked is beaten only once the board
+// no longer reports it paused, because the board resumes a paused session on any heartbeat
+// (FLOW-445).
 export const runHeartbeat = (session?: string): void => {
   if (!dashboardAvailable()) {
     return
   }
 
   let targets: string[]
+  // A marked leaf's id, mapped to the session whose registry holds the mark.
+  const pausedOwners = new Map<string, string>()
   try {
     const rawId = resolveRawSessionId(session)
-    const ownLeaves = registryLeaves(loadRegistry(rawId)).map((l) => l.internalId)
-    const leadLeaves = leadLeafIds(rawId)
+    const nodes = loadRegistry(rawId)
+    const ownLeaves = registryLeaves(nodes).map((l) => l.internalId)
+    const lead = leadLeaves(rawId)
     const resolved = ownLeaves.length === 0 ? resolveSessionId(session) : undefined
-    const resolvedNamesNoNode = resolved === tryResolveRawSessionId() && leadLeaves.length > 0
+    const resolvedNamesNoNode = resolved === tryResolveRawSessionId() && lead.ids.length > 0
     const fallback = resolved === undefined || resolvedNamesNoNode ? [] : [resolved]
-    targets = [...new Set([...ownLeaves, ...fallback, ...leadLeaves])]
+    targets = [...new Set([...ownLeaves, ...fallback, ...lead.ids])]
+    for (const id of lead.pausedIds) {
+      pausedOwners.set(id, lead.session)
+    }
+    for (const n of nodes) {
+      if (n.paused === true) {
+        pausedOwners.set(n.internalId, rawId)
+      }
+    }
   } catch (err) {
     process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`)
     setRequestedExitCode(1)
@@ -46,31 +63,99 @@ export const runHeartbeat = (session?: string): void => {
   }
 
   for (const id of targets) {
+    const owner = pausedOwners.get(id)
+
+    if (owner !== undefined && isPausedOnBoard(owner, id)) {
+      continue
+    }
+
     invokeDashboard(['session', 'heartbeat', '--id', id])
   }
 }
 
-// The lead's live leaves when this session is a teammate, else none. A lead that cannot be found
-// because the process table cannot be read, or a lead registry that cannot be read, is reported and
-// skipped, so it never costs the teammate its own beat.
-const leadLeafIds = (rawId: string): string[] => {
+// Set the current leaf (or `--key`'s node) aside on the board, then mark it so `runHeartbeat`
+// leaves it alone. A target this session's registry does not hold cannot be marked, so it is
+// refused before the board is called: a pause with no mark would be undone by the next beat.
+export const runPause = (session?: string, key?: string): void => {
+  if (!dashboardAvailable()) {
+    return
+  }
+
+  const target = resolveSessionTargetOrRefuse(session, key)
+  if (target === null) {
+    return
+  }
+
+  const rawId = tryResolveRawSessionId()
+  if (rawId === null || !loadRegistry(rawId).some((n) => n.internalId === target)) {
+    process.stderr.write(
+      `dashboard session pause: ${target} is not a node in this session's registry, so its pause ` +
+        `could not be marked and the next heartbeat would resume it — nothing was paused\n`
+    )
+    setRequestedExitCode(1)
+    return
+  }
+
+  if (invokeDashboard(['session', 'pause', '--id', target]) === null) {
+    return
+  }
+
+  setRegistryNodePaused(rawId, target, true)
+}
+
+// Clear the mark and beat the node: a heartbeat resumes a paused node.
+export const runResume = (session?: string, key?: string): void => {
+  if (!dashboardAvailable()) {
+    return
+  }
+
+  const target = resolveSessionTargetOrRefuse(session, key)
+  if (target === null) {
+    return
+  }
+
+  const rawId = tryResolveRawSessionId()
+  if (rawId !== null) {
+    setRegistryNodePaused(rawId, target, false)
+  }
+
+  invokeDashboard(['session', 'heartbeat', '--id', target])
+}
+
+interface LeadLeaves {
+  session: string
+  ids: string[]
+  pausedIds: string[]
+}
+
+// The lead's live leaves, and which of them `session pause` marked, when this session is a
+// teammate, else none. A lead that cannot be found because the process table cannot be read, or a
+// lead registry that cannot be read, is reported and skipped, so it never costs the teammate its
+// own beat.
+const leadLeaves = (rawId: string): LeadLeaves => {
+  const none: LeadLeaves = { session: rawId, ids: [], pausedIds: [] }
   const lead = resolveLeadSessionId()
   if (lead === null) {
     process.stderr.write(`could not read the process table to find this session's lead\n`)
     setRequestedExitCode(1)
-    return []
+    return none
   }
 
   if (lead === undefined || lead === rawId) {
-    return []
+    return none
   }
 
   try {
-    return registryLeaves(loadRegistry(lead)).map((l) => l.internalId)
+    const leaves = registryLeaves(loadRegistry(lead))
+    return {
+      session: lead,
+      ids: leaves.map((l) => l.internalId),
+      pausedIds: leaves.filter((l) => l.paused === true).map((l) => l.internalId),
+    }
   } catch (err) {
     process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`)
     setRequestedExitCode(1)
-    return []
+    return none
   }
 }
 
@@ -433,3 +518,9 @@ const refuseRootLinkForKeyedTicket = (ticket: string): boolean => {
   setRequestedExitCode(1)
   return true
 }
+
+// A board read that fails, or that does not find the node, reads as "not paused", so the beat
+// goes out. A missed pause costs only what it cost before FLOW-445; a missed beat would leave an
+// active node to read as hung.
+const isPausedOnBoard = (rawId: string, id: string): boolean =>
+  findBoardNodeFor(rawId, id, { quiet: true })?.lifecycle === 'paused'

@@ -25,12 +25,13 @@ export interface ReleasedReference {
 export const formatReleasedEntry = (item: ReleasedItem, nodeId: string): string =>
   `${formatReleasedItem(item)}\n  → ${releasedItemInstruction(item, nodeId)}`
 
-// What to do with a released item, as one sentence. Every command targets the node the item was
-// released on by `--session`: the anchor is the root when the session has several live leaves, and a
-// command without `--session` refuses there. A comment is answered on the board before it is
-// consumed; the `[dashboard] item` tag alone does not say a reply belongs there.
+// What to do with a released item, as one sentence. A comment's reply targets the node the item was
+// released on by `--session`: the anchor is the root when the session has several live leaves, and
+// `item add` without `--session` refuses there. Consuming needs no session — the item id names its
+// own. A comment is answered on the board before it is consumed; the `[dashboard] item` tag alone
+// does not say a reply belongs there.
 export const releasedItemInstruction = (item: ReleasedItem, nodeId: string): string => {
-  const consume = `\`dashboard item consume --item ${item.id} --session ${nodeId}\``
+  const consume = `\`dashboard item consume --item ${item.id}\``
   if (item.type === 'comment') {
     return (
       'reply on the board, not only in the terminal, unless it asks nothing and gives you nothing to act on: ' +

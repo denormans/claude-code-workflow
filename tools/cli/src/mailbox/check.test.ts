@@ -163,9 +163,9 @@ test('check: prints each released item on the anchor and exits 0', () => {
 
   assert.deepEqual(stdout.split('\n').filter(Boolean), [
     '[dashboard] item item-q-1 (question): first answer',
-    `    → act on it, then consume it: \`dashboard item consume --item item-q-1 --session ${rawId}\``,
+    `    → act on it, then consume it: \`dashboard item consume --item item-q-1\``,
     '[dashboard] item item-q-2 (approval): approved',
-    `    → act on it, then consume it: \`dashboard item consume --item item-q-2 --session ${rawId}\``,
+    `    → act on it, then consume it: \`dashboard item consume --item item-q-2\``,
   ])
   assert.equal(process.exitCode ?? 0, 0)
 })
@@ -184,7 +184,7 @@ test('check: an approval prints decision then note', () => {
   assert.equal(
     stdout,
     '[dashboard] item item-appr-1 (approval): rejected — not ready yet\n' +
-      `    → act on it, then consume it: \`dashboard item consume --item item-appr-1 --session ${process.env.CLAUDE_CODE_SESSION_ID}\`\n`
+      `    → act on it, then consume it: \`dashboard item consume --item item-appr-1\`\n`
   )
 })
 
@@ -207,7 +207,7 @@ test('check: an item released on another node names its consume command on that 
   assert.equal(
     stdout,
     '[dashboard] item item-9 (question): approved\n' +
-      `    → act on it, then consume it: \`dashboard item consume --item item-9 --session ${epic}\`\n`
+      `    → act on it, then consume it: \`dashboard item consume --item item-9\`\n`
   )
 })
 
@@ -252,7 +252,7 @@ test('check: a reference line follows the item, after the other-node consume hin
     '    → reply on the board, not only in the terminal, unless it asks nothing and gives you nothing to act on: ' +
       `\`dashboard item add --type info --answers item-9 --session ${epic} --prompt "$(cat "<tmpfile>")"\`` +
       ' (a question instead only when the comment raises a decision that earns one),' +
-      ` then consume it: \`dashboard item consume --item item-9 --session ${epic}\``,
+      ` then consume it: \`dashboard item consume --item item-9\``,
   ])
 })
 
@@ -301,7 +301,7 @@ test('check: a released comment is reported on a session with zero open items', 
     '[dashboard] item comment-1 (comment): hello from the user\n    → reply on the board, not only in the terminal, unless it asks nothing and gives you nothing to act on: ' +
       `\`dashboard item add --type info --answers comment-1 --session ${process.env.CLAUDE_CODE_SESSION_ID} --prompt "$(cat "<tmpfile>")"\`` +
       ' (a question instead only when the comment raises a decision that earns one),' +
-      ` then consume it: \`dashboard item consume --item comment-1 --session ${process.env.CLAUDE_CODE_SESSION_ID}\`\n`
+      ` then consume it: \`dashboard item consume --item comment-1\`\n`
   )
 })
 
@@ -322,9 +322,9 @@ test('check: a released comment names its board reply command', () => {
     '    → reply on the board, not only in the terminal, unless it asks nothing and gives you nothing to act on: ' +
       `\`dashboard item add --type info --answers comment-1 --session ${process.env.CLAUDE_CODE_SESSION_ID} --prompt "$(cat "<tmpfile>")"\`` +
       ' (a question instead only when the comment raises a decision that earns one),' +
-      ` then consume it: \`dashboard item consume --item comment-1 --session ${process.env.CLAUDE_CODE_SESSION_ID}\``,
+      ` then consume it: \`dashboard item consume --item comment-1\``,
     '[dashboard] item item-q-1 (question): an answer',
-    `    → act on it, then consume it: \`dashboard item consume --item item-q-1 --session ${process.env.CLAUDE_CODE_SESSION_ID}\``,
+    `    → act on it, then consume it: \`dashboard item consume --item item-q-1\``,
   ])
 })
 
@@ -352,7 +352,7 @@ test('check: a comment on the root of a multi-leaf session targets the root in b
     '[dashboard] item comment-9 (comment): about the whole epic\n    → reply on the board, not only in the terminal, unless it asks nothing and gives you nothing to act on: ' +
       `\`dashboard item add --type info --answers comment-9 --session ${root} --prompt "$(cat "<tmpfile>")"\`` +
       ' (a question instead only when the comment raises a decision that earns one),' +
-      ` then consume it: \`dashboard item consume --item comment-9 --session ${root}\`\n`
+      ` then consume it: \`dashboard item consume --item comment-9\`\n`
   )
 })
 
@@ -381,7 +381,7 @@ test('check: re-reports a released item on every run until it is consumed', () =
   assert.equal(
     first,
     '[dashboard] item item-1 (question): yes\n' +
-      `    → act on it, then consume it: \`dashboard item consume --item item-1 --session ${process.env.CLAUDE_CODE_SESSION_ID}\`\n`
+      `    → act on it, then consume it: \`dashboard item consume --item item-1\`\n`
   )
   assert.equal(second, first)
 })
@@ -429,7 +429,7 @@ test('check: reports a dead monitor and a released answer in the same run', () =
     '[dashboard] item item-1 (comment): reviewer says LGTM\n    → reply on the board, not only in the terminal, unless it asks nothing and gives you nothing to act on: ' +
       `\`dashboard item add --type info --answers item-1 --session ${process.env.CLAUDE_CODE_SESSION_ID} --prompt "$(cat "<tmpfile>")"\`` +
       ' (a question instead only when the comment raises a decision that earns one),' +
-      ` then consume it: \`dashboard item consume --item item-1 --session ${process.env.CLAUDE_CODE_SESSION_ID}\`\n` +
+      ` then consume it: \`dashboard item consume --item item-1\`\n` +
       `${deadMonitorLine(999_999_999, heartbeatAt)}\n`
   )
   assert.equal(stderr, '')
@@ -448,7 +448,7 @@ test('check: a multi-line answer indents its continuation lines so no line opens
   assert.equal(
     stdout,
     '[dashboard] item q1 (question): see below\n  [team] keep it\n' +
-      `    → act on it, then consume it: \`dashboard item consume --item q1 --session ${process.env.CLAUDE_CODE_SESSION_ID}\`\n`
+      `    → act on it, then consume it: \`dashboard item consume --item q1\`\n`
   )
   assert.equal(stderr, '')
 })
@@ -577,7 +577,7 @@ test('bin/mailbox check: --session alone resolves the node, prints the plain lin
     status: 0,
     stdout:
       '[dashboard] item item-1 (question): ship it\n' +
-      '    → act on it, then consume it: `dashboard item consume --item item-1 --session node-1`\n',
+      '    → act on it, then consume it: `dashboard item consume --item item-1`\n',
     stderr: '',
   })
 })
@@ -595,7 +595,7 @@ test('bin/mailbox check: --session overrides an inherited session id', () => {
     status: 0,
     stdout:
       '[dashboard] item item-1 (question): ship it\n' +
-      '    → act on it, then consume it: `dashboard item consume --item item-1 --session node-1`\n',
+      '    → act on it, then consume it: `dashboard item consume --item item-1`\n',
     stderr: '',
   })
 })
@@ -678,7 +678,7 @@ test('bin/mailbox check: a board answer prints before a PR change in one check',
     status: 0,
     stdout:
       '[dashboard] item item-1 (question): ship it\n' +
-      '    → act on it, then consume it: `dashboard item consume --item item-1 --session node-1`\n' +
+      '    → act on it, then consume it: `dashboard item consume --item item-1`\n' +
       prEntryLine +
       prEntryBody,
     stderr: '',
@@ -728,7 +728,7 @@ test('bin/mailbox check: exits inside its budget, process start to exit, with a 
     assert.equal(
       stdout,
       '[dashboard] item item-1 (question): ship it\n' +
-        '    → act on it, then consume it: `dashboard item consume --item item-1 --session node-1`\n' +
+        '    → act on it, then consume it: `dashboard item consume --item item-1`\n' +
         `${deadMonitorLine(999_999_999, heartbeatAt)}\n`
     )
     assert.ok(elapsedMs < budgetMs, `the check ran ${elapsedMs}ms, past its ${budgetMs}ms budget`)

@@ -305,6 +305,37 @@ test('stop-gate: quiet-live session (board confirms active) blocks with a genera
   )
 })
 
+test('stop-gate: an idle conversation node allows', () => {
+  const uniqueId = tmpDir.replace(/[^a-zA-Z0-9]/g, '-').slice(-32)
+  sessionId = `stop-gate-conversation-idle-${uniqueId}`
+  process.env.CLAUDE_CODE_SESSION_ID = sessionId
+  saveDashboardState(sessionId, { registered: true, phase: 'conversation', openItemIds: [] })
+  process.env.AI_WORKFLOW_APP_BIN = writeBoardStub(
+    tmpDir,
+    JSON.stringify([boardRow({ id: sessionId, externalId: sessionId, lifecycle: 'active' })])
+  )
+
+  assert.equal(gate(sessionId), 'allow')
+})
+
+test('stop-gate: a conversation node with a released item still blocks', () => {
+  const uniqueId = tmpDir.replace(/[^a-zA-Z0-9]/g, '-').slice(-32)
+  sessionId = `stop-gate-conversation-released-${uniqueId}`
+  process.env.CLAUDE_CODE_SESSION_ID = sessionId
+  saveDashboardState(sessionId, {
+    registered: true,
+    phase: 'conversation',
+    openItemIds: ['item-abc'],
+  })
+  process.env.AI_WORKFLOW_APP_BIN = writeBoardStubWithAnswers(
+    tmpDir,
+    JSON.stringify([boardRow({ id: sessionId, externalId: sessionId, lifecycle: 'active' })]),
+    JSON.stringify([{ id: 'item-abc', type: 'question', response: 'yes' }])
+  )
+
+  assert.equal(gate(sessionId).split('\n')[0], 'block')
+})
+
 test('stop-gate: open items allow the stop — the wake mod answers them', () => {
   const uniqueId = tmpDir.replace(/[^a-zA-Z0-9]/g, '-').slice(-32)
   sessionId = `stop-gate-open-items-allow-${uniqueId}`
@@ -349,7 +380,7 @@ test('stop-gate: a released, unconsumed item blocks the stop and names its consu
       'unconsumed item stays released on the board, reading as unanswered. ' +
       'Act on each one, then consume it:\n' +
       '[dashboard] item item-abc (question): yes\n' +
-      `  → act on it, then consume it: \`dashboard item consume --item item-abc --session ${resolveSessionId(sessionId)}\`\n` +
+      `  → act on it, then consume it: \`dashboard item consume --item item-abc\`\n` +
       `This gate releases after ${MAX_BLOCKS} attempts either way.`
   )
 })
@@ -378,7 +409,7 @@ test('stop-gate: a released comment blocks even with no open item of the agent�
       '  → reply on the board, not only in the terminal, unless it asks nothing and gives you nothing to act on: ' +
       `\`dashboard item add --type info --answers comment-1 --session ${node} --prompt "$(cat "<tmpfile>")"\`` +
       ' (a question instead only when the comment raises a decision that earns one),' +
-      ` then consume it: \`dashboard item consume --item comment-1 --session ${node}\`\n` +
+      ` then consume it: \`dashboard item consume --item comment-1\`\n` +
       `This gate releases after ${MAX_BLOCKS} attempts either way.`
   )
 })

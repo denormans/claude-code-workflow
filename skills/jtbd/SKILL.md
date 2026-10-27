@@ -39,6 +39,8 @@ description: Use when starting substantial new work — a feature or anything wi
    ```
    This re-enters the node the lookup names — its own node when this ticket has one (work run as a story under an epic root), otherwise the root — updating its title to the real summary. `--retitle` is what authorises the rename — without it the CLI refuses to rename a node it already entered. The ticket is attached as a `kind:ticket` link — do **not** pass `--ticket`. Use the ticket's canonical browse URL (the `webUrl` field on the create/get response) — do not hardcode a Jira host. With no ticket, skip the `link add`; the lookup above still resolves the node.
 
+   **Stage hooks:** run `workflow-hooks run --moment prd.before --ticket "<TICKET-ID>"` now, from the launch directory (with no ticket, drop `--ticket`), and act on its exit code per `skills/workflow-guide/references/stage-hooks.md`.
+
 5. **Write the PRD** to `docs/plans/YYYY-MM-DD-<topic>-1-prd.md`. Write the North Star first and confirm its wording with the user before passing the gate. Template and writing rules: `references/jtbd-reference.md` §Write the PRD.
 
 6. **Host in Notion, then notify** — full protocol: `skills/workflow-guide/references/notification-protocol.md` (PRD row: `--kind prd`, `--label PRD`, suffix `1-prd.md`). This is the one doc type where every JTBD run is a new unit of work, so it starts a fresh dashboard root.
@@ -50,5 +52,6 @@ description: Use when starting substantial new work — a feature or anything wi
    - If no Notion page: add nothing — the PRD stays local in `docs/plans/`.
 
 9. **Invoke the Architecture skill** (`workflow:architecture`) for technical design, in the same turn — do not stop, summarize, and wait for permission. The Architecture skill self-abbreviates if the architecture is trivial.
+   First run `workflow-hooks run --moment prd.after --ticket "<TICKET-ID>"` from the launch directory (with no ticket, drop `--ticket`) and act on its exit code per `skills/workflow-guide/references/stage-hooks.md`; a blocking failure holds this handoff until it is answered.
 
 Long-form guidance, templates, and rationale: read `references/jtbd-reference.md` — mandatory before your first run of this skill in a session.

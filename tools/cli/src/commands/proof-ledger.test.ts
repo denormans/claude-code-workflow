@@ -1,12 +1,13 @@
 import { test, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { readProofLedger } from '../proof-ledger/ledger.ts'
+import { captureId, readProofLedger } from '../proof-ledger/ledger.ts'
 
 // Round-24-addendum finding: deleting this file's pre-cut contents (the two `require`-only tests)
 // along with `require` itself left proof-ledger with zero coverage of its own CLI entrypoint — the
@@ -67,7 +68,7 @@ const runCli = (args: string[]): { stdout: string; stderr: string; status: numbe
     ['--experimental-transform-types', mainTsPath, ...args],
     {
       encoding: 'utf8',
-      env: { ...process.env, HOME: homeDir },
+      env: { ...process.env, HOME: homeDir, NODE_NO_WARNINGS: '1' },
     }
   )
   return { stdout: result.stdout, stderr: result.stderr, status: result.status }
@@ -125,6 +126,104 @@ test('CLI: proof-ledger record, show and check still route through the real bina
     0,
     `check routes and reports the recorded evidence as coverage; stderr: ${checkResult.stderr}`
   )
+})
+
+test('CLI: a slice capture records and shows through the real binary, and refuses --sha-is-label', () => {
+  const record = [
+    'proof-ledger',
+    'record',
+    '--ticket',
+    ticket,
+    '--task',
+    'slice-1',
+    '--capture',
+    'slice',
+    '--sha',
+    headSha,
+    '--command',
+    'echo ok',
+    '--exit',
+    '0',
+    '--output',
+    'ok',
+    '--repo-root',
+    repoRoot,
+  ]
+  const okDigest = '2689367b205c16ce32ed4200942b8b8b1e262dfc70d9bc9fbc77c49699a4f1df'
+  const outputPath = join(
+    homeDir,
+    '.claude',
+    'workflow-state',
+    'tickets',
+    ticket,
+    'proof-output',
+    `slice-slice-1-${headSha}-${okDigest}.out`
+  )
+  const recorded = runCli(record)
+  assert.equal(recorded.status, 0)
+  assert.equal(recorded.stderr, '')
+  const id = captureId(
+    'slice-1',
+    'slice',
+    headSha,
+    'echo ok',
+    createHash('sha256').update('ok').digest('hex')
+  )
+  assert.equal(
+    recorded.stdout,
+    JSON.stringify({
+      ticket,
+      id,
+      task: 'slice-1',
+      capture: 'slice',
+      sha: headSha,
+      exitStatus: 0,
+      outputPath,
+      outputSha256: okDigest,
+      outputBytes: 2,
+    }) + '\n'
+  )
+
+  const shown = runCli(['proof-ledger', 'show', '--ticket', ticket, '--capture', 'slice'])
+  assert.equal(shown.status, 0)
+  assert.equal(shown.stderr, '')
+  const at = readProofLedger(ticket).captures[0]?.at
+  assert.equal(typeof at, 'string')
+  assert.equal(
+    shown.stdout,
+    JSON.stringify({
+      ticket,
+      captures: [
+        {
+          kind: 'proof-capture',
+          at,
+          id,
+          task: 'slice-1',
+          capture: 'slice',
+          sha: headSha,
+          command: 'echo ok',
+          exitStatus: 0,
+          outputPath,
+          outputSha256: okDigest,
+          outputBytes: 2,
+          tail: 'ok',
+        },
+      ],
+      skippedLines: 0,
+    }) + '\n'
+  )
+
+  const labelled = runCli([...record, '--sha-is-label'])
+  assert.equal(labelled.status, 6)
+  assert.equal(
+    labelled.stdout,
+    JSON.stringify({
+      error:
+        '--sha-is-label cannot be declared on a slice capture: a slice check drives the slice through its entry point at the commit that completes it, so --sha names the tree it certifies, not a commit it is free to merely label',
+    }) + '\n'
+  )
+  assert.equal(labelled.stderr, '')
+  assert.equal(readProofLedger(ticket).captures.length, 1, 'the refused capture was not recorded')
 })
 
 // 251 is Stricli's own "no command registered" exit, not something proof-ledger assigns to

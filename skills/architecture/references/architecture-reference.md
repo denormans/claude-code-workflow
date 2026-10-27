@@ -26,6 +26,68 @@ Before asking questions, understand the technical landscape:
 - Understand what's already built that this work builds on
 - **Stale PRD check:** If the PRD was written more than a few days ago, review the current project state and recent commits to check whether the project has drifted significantly. If it has, go back to the JTBD skill (`workflow:jtbd`) to re-validate the PRD before proceeding with architecture.
 
+## Current-State Research
+
+What the design assumes the code does today is checked by an agent that does not know what is
+planned. An agent that knows the goal reads the code looking for support for it; one that knows only
+the question describes what is there. The `current-state-researcher` agent
+(`agents/current-state-researcher.md`) is that agent, and `hooks/current-state-guard.sh` keeps it out
+of `docs/plans/`, ticket worktrees, memory and everything outside the working directory.
+
+**When it runs.** On feature work that changes existing behaviour. Skip it when the work is
+greenfield or the PRD touches no existing behaviour, and write `No research: greenfield.` (or `No
+research: no existing behaviour changes.`) as the architecture doc's Premises section.
+
+**Write the questions.** From the PRD, list what the design will depend on about the code as it is:
+what calls something, where a value is stored, what a command does when it fails, which files share a
+convention. Each question describes; none proposes. A question never names the ticket, the feature,
+the PRD or the change, and never asks what should be done — the agent refuses "how should…" and
+"what would it take to…" questions and lists them as refused. Before sending, read each question as
+someone who knows nothing of the plan; if it gives the plan away, rewrite it.
+
+**Give it the questions alone.** Hand the current-state researcher, as a short-lived sub-agent, the
+numbered questions inline plus the source directories to search, relative to the working
+directory. Nothing else — not what the answers are for (the exception to
+`skills/workflow-guide/references/routing.md` §Research Delegation), and not a path to a question
+file, which would sit under the guarded `docs/plans/`. From a workspace root that holds `docs/plans/`
+or a repo that holds `.worktrees/`, a search of the whole tree is refused, so name the source
+directories (`<repo>/skills`, `<repo>/tools/cli/src`) rather than leaving the agent to find them.
+Name every directory the questions touch, agent definitions and hooks included, because the agent
+cannot widen its own search and a directory left out comes back Unreachable.
+
+**History goes elsewhere.** The agent has no Bash, so it cannot read `git log` or `git blame`. Ask a
+history question of the ordinary `researcher`; a premise resting on that answer is `lead-verified`.
+
+**Save the research doc** to `docs/plans/YYYY-MM-DD-<topic>-1-research.md`, with the PRD's date and
+topic, so it sorts after the PRD and before the architecture doc. Copy the agent's report verbatim:
+the doc is the record of what research that never saw the plan found, and an edited report is no
+longer that. Once the architecture page is hosted (SKILL.md step 4), host the research doc as its
+child page with the same Phase 0–1 preparation as any hosted doc
+(`skills/workflow-guide/references/notification-protocol.md`), and link it from the Premises section.
+
+**Write the Premises.** Each claim the design makes about today's behaviour is one row. A row from
+the research doc is `research`; one you checked yourself by reading the code, or got from the ordinary
+researcher, is `lead-verified` and names the symbol. A premise the research contradicts never reaches
+the user as `confirmed`: change the design and mark the row `contradicted-and-fixed` with what
+changed, or remove the premise. A question the agent refused or could not reach is not a premise
+until you verify it yourself.
+
+### Research Doc Template
+
+With no ticket, omit the `**Jira:**` line:
+
+~~~markdown
+# [Title] — Current-State Research
+
+**Jira:** [TICKET-ID]
+
+## Questions
+1. <question, exactly as sent>
+
+## Report
+<the agent's report, verbatim>
+~~~
+
 ## Assess Clarity
 
 Decide how much questioning is needed:
@@ -135,6 +197,16 @@ directory with multiple repos) — the repo is obvious from context.
 Key types, models, or schemas. Use TypeScript interfaces,
 SQL DDL, or similar — just the shapes, not the logic.
 
+## Premises
+What this design assumes the code does today. Research: [Current-State Research](<research page link>).
+
+| Claim | Source | Evidence | Status |
+|---|---|---|---|
+| <what the code does today> | research / lead-verified | <the research finding, or the symbol read> | confirmed / contradicted-and-fixed: <what changed> |
+
+With no research, this section is the one line `No research: greenfield.` (or `No
+research: no existing behaviour changes.`).
+
 ## API Contracts
 Endpoints, message formats, event schemas. Request/response
 shapes only. Error cases.
@@ -191,7 +263,11 @@ in the target environment, later stories will fail too.
 
 ## Stories
 Logical breakdown of the work into shippable chunks.
-Each story is a feature-level unit, NOT a repo-level unit.
+Each story is a feature-level unit, NOT a repo-level unit,
+and a vertical one: it delivers an observable result
+through the real entry points, never one layer
+(skills/workflow-guide/references/routing.md
+§Cross-Phase Rule: Work Is Planned in Vertical Slices).
 A single story may touch multiple repos.
 
 1. **Story title** — Brief description of what this delivers
