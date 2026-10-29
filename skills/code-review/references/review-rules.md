@@ -166,6 +166,7 @@ This is a reusable disposition, not just a review note: when an automated review
 ### Tests
 
 **You review the test *code*; you do not run the suite — CI does.** Tests should follow the **test diamond**: mostly integration, thin unit, thin e2e, with VERY FEW MOCKS. Judge the items below by reading the tests.
+- [ ] **A finding never asks for a whole-suite run.** A finding that needs tests rerun names the test files to rerun (`skills/workflow-guide/contract.md`, *Tests take turns*).
 - [ ] Tests focus on integration — most testing should be from the API level
 - [ ] Some UI testing if applicable, but not excessive
 - [ ] Minimal unit testing of low-level functions unless there is interesting or complex logic

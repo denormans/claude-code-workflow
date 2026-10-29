@@ -13,7 +13,7 @@
 # cmp, so a missing or extra trailing newline fails.
 
 set -uo pipefail
-unset TEST_LOCK_HELD CLAUDE_CODE_SESSION_ID TEST_LOCK_ROOT TEST_LOCK_BEAT_SECONDS TEST_LOCK_DASHBOARD
+unset TEST_LOCK_HELD CLAUDE_CODE_SESSION_ID TEST_LOCK_ROOT TEST_LOCK_BEAT_SECONDS TEST_LOCK_LONG_SECONDS TEST_LOCK_DASHBOARD
 
 TEST_LOCK="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)/bin/test-lock"
 TMP_ROOT="$(mktemp -d)"
@@ -34,6 +34,11 @@ main() {
     case_beat_flag_names_the_session
     case_killed_test_lock_stops_beating
     case_no_session_no_beat
+    case_long_hold_is_flagged_once
+    case_long_command_still_posts_a_note
+    case_refused_note_is_reported
+    case_short_run_is_not_flagged
+    case_killed_test_lock_stops_the_long_watch
     case_nested_call_runs_directly
     case_status_names_the_holder
     case_stdin_reaches_the_command
@@ -41,7 +46,9 @@ main() {
     case_unopenable_lock_runs_unlocked
     case_symlinked_lock_dir_runs_unlocked
     case_failed_wait_keeps_the_holder_record
+    case_unlocked_run_is_not_flagged
     case_usage_errors
+    case_bad_seconds_are_refused
     echo "test-lock: ${PASS} passed, ${FAIL} failed"
     [[ ${FAIL} -eq 0 ]]
 }
@@ -235,6 +242,77 @@ case_no_session_no_beat() {
     check "no session: never beats" "absent" "$([[ -e "${dir}/beats" ]] && echo present || echo absent)"
 }
 
+case_long_hold_is_flagged_once() {
+    local dir="${TMP_ROOT}/long" rc
+    mkdir -p "$dir"
+    write_dashboard_stub "${dir}/dashboard" "${dir}/calls" "${dir}/never"
+    CLAUDE_CODE_SESSION_ID=sess-long TEST_LOCK_LONG_SECONDS=1 TEST_LOCK_DASHBOARD="${dir}/dashboard" \
+        TEST_LOCK_ROOT="$dir" "$TEST_LOCK" -- sleep 4 >"${dir}/out" 2>"${dir}/err"
+    rc=$?
+    check "long hold: exits with the command's exit code" "0" "$rc"
+    same_bytes "long hold: stdout is the command's" /dev/null "${dir}/out"
+    printf 'test-lock: lock free — running\ntest-lock: still running after Ns — sleep 4\ntest-lock: released after Ns, exit 0\n' > "${dir}/err.expected"
+    normalise < "${dir}/err" > "${dir}/err.normalised"
+    same_bytes "long hold: flagged once on stderr" "${dir}/err.expected" "${dir}/err.normalised"
+    printf 'waiting item add --type info --prompt One test run has held the test lock for Ns, so every other agent'"'"'s tests are waiting behind it.\n\n`sleep 4` in `%s`\n' "$PWD" > "${dir}/calls.expected"
+    normalise < "${dir}/calls" > "${dir}/calls.normalised"
+    same_bytes "long hold: posts one board note, whole" "${dir}/calls.expected" "${dir}/calls.normalised"
+}
+
+case_long_command_still_posts_a_note() {
+    local dir="${TMP_ROOT}/long-command" argument
+    mkdir -p "$dir"
+    write_dashboard_stub "${dir}/dashboard" "${dir}/calls" "${dir}/never"
+    argument="$(printf 'x%.0s' $(seq 1 2000))"
+    CLAUDE_CODE_SESSION_ID=sess-long-command TEST_LOCK_LONG_SECONDS=1 TEST_LOCK_DASHBOARD="${dir}/dashboard" \
+        TEST_LOCK_ROOT="$dir" "$TEST_LOCK" -- bash -c 'sleep 4' _ "$argument" >/dev/null 2>/dev/null
+    printf '`bash -c sleep 4 _ %s...` in `%s`\n' "$(printf 'x%.0s' $(seq 1 382))" "$PWD" > "${dir}/line.expected"
+    check "long command: the note holds the command cut to 400 characters" "1" \
+        "$(grep -cFx -f "${dir}/line.expected" "${dir}/calls")"
+}
+
+case_refused_note_is_reported() {
+    local dir="${TMP_ROOT}/refused" rc
+    mkdir -p "$dir"
+    printf '#!/usr/bin/env bash\nexit 3\n' > "${dir}/dashboard"
+    chmod +x "${dir}/dashboard"
+    CLAUDE_CODE_SESSION_ID=sess-refused TEST_LOCK_LONG_SECONDS=1 TEST_LOCK_DASHBOARD="${dir}/dashboard" \
+        TEST_LOCK_ROOT="$dir" "$TEST_LOCK" -- sleep 4 >"${dir}/out" 2>"${dir}/err"
+    rc=$?
+    check "refused note: exits with the command's exit code" "0" "$rc"
+    same_bytes "refused note: stdout is the command's" /dev/null "${dir}/out"
+    printf 'test-lock: lock free — running\ntest-lock: still running after Ns — sleep 4\ntest-lock: could not post the board note\ntest-lock: released after Ns, exit 0\n' > "${dir}/err.expected"
+    normalise < "${dir}/err" > "${dir}/err.normalised"
+    same_bytes "refused note: says the note was not posted" "${dir}/err.expected" "${dir}/err.normalised"
+}
+
+case_short_run_is_not_flagged() {
+    local dir="${TMP_ROOT}/short"
+    mkdir -p "$dir"
+    write_dashboard_stub "${dir}/dashboard" "${dir}/calls" "${dir}/never"
+    CLAUDE_CODE_SESSION_ID=sess-short TEST_LOCK_LONG_SECONDS=30 TEST_LOCK_DASHBOARD="${dir}/dashboard" \
+        TEST_LOCK_ROOT="$dir" "$TEST_LOCK" -- sleep 1 >/dev/null 2>"${dir}/err"
+    check "short run: exits with the command's exit code" "0" "$?"
+    printf 'test-lock: lock free — running\ntest-lock: released after Ns, exit 0\n' > "${dir}/err.expected"
+    normalise < "${dir}/err" > "${dir}/err.normalised"
+    same_bytes "short run: the transcript has the lock line and no flag" "${dir}/err.expected" "${dir}/err.normalised"
+    check "short run: no board note" "absent" "$([[ -e "${dir}/calls" ]] && echo present || echo absent)"
+}
+
+case_killed_test_lock_stops_the_long_watch() {
+    local dir="${TMP_ROOT}/long-kill" a_pid
+    mkdir -p "$dir"
+    ln -s "$TEST_LOCK" "${dir}/test-lock-under-watch"
+    write_worker "${dir}/worker.sh" "${dir}/started"
+    TEST_LOCK_LONG_SECONDS=300 TEST_LOCK_ROOT="$dir" "${dir}/test-lock-under-watch" -- "${dir}/worker.sh" 2>/dev/null &
+    a_pid=$!
+    track "$a_pid"
+    wait_for "long kill: the run started" 30 test -e "${dir}/started" || return
+    kill -KILL "$a_pid"
+    wait "$a_pid" 2>/dev/null
+    wait_for "long kill: no process of the killed test-lock is left" 15 process_gone "${dir}/test-lock-under-watch"
+}
+
 case_nested_call_runs_directly() {
     local dir="${TMP_ROOT}/nested" a_pid
     mkdir -p "$dir"
@@ -268,10 +346,28 @@ case_status_names_the_holder() {
     TEST_LOCK_ROOT="$dir" "$TEST_LOCK" status > "${dir}/held-out" 2> "${dir}/held-err"
     rc=$?
     same_bytes "status: held lock prints nothing on stderr" /dev/null "${dir}/held-err"
-    printf 'held by %s running `bash -c touch "$1"; sleep 10 _ %s` (pid N) since TIME\n' "$PWD" "${dir}/a-started" > "${dir}/held-out.expected"
+    printf 'held by %s running `bash -c touch "$1"; sleep 10 _ %s` (pid N) since TIME — held for N\n' "$PWD" "${dir}/a-started" > "${dir}/held-out.expected"
     normalise < "${dir}/held-out" > "${dir}/held-out.normalised"
     same_bytes "status: held lock names the holder" "${dir}/held-out.expected" "${dir}/held-out.normalised"
     check "status: exits 0 when held" "0" "$rc"
+    printf '%s running `bash -c touch "$1"; sleep 10 _ %s` (pid N) since TIME\n' "$PWD" "${dir}/a-started" > "${dir}/record.expected"
+    normalise < "${dir}/${LOCK_DIR_NAME}/holder" > "${dir}/record.normalised"
+    same_bytes "status: the holder record is the single line every test-lock version reads" "${dir}/record.expected" "${dir}/record.normalised"
+    printf '%s running `older test-lock` (pid 1) since 2020-01-01 00:00:00\n' "$PWD" > "${dir}/${LOCK_DIR_NAME}/holder"
+    TEST_LOCK_ROOT="$dir" "$TEST_LOCK" status > "${dir}/dated-out" 2> "${dir}/dated-err"
+    printf 'held by %s running `older test-lock` (pid N) since TIME — held for N\n' "$PWD" > "${dir}/dated-out.expected"
+    sed -E 's/\(pid 1\)/(pid N)/' "${dir}/dated-out" | normalise > "${dir}/dated-out.normalised"
+    same_bytes "status: a record with a start time prints how long it has been held" "${dir}/dated-out.expected" "${dir}/dated-out.normalised"
+    printf '%s running `older test-lock` (pid 1)\n' "$PWD" > "${dir}/${LOCK_DIR_NAME}/holder"
+    TEST_LOCK_ROOT="$dir" "$TEST_LOCK" status > "${dir}/old-out" 2> "${dir}/old-err"
+    printf 'held by %s running `older test-lock` (pid 1)\n' "$PWD" > "${dir}/old-out.expected"
+    same_bytes "status: a record with no start time prints no held-for figure" "${dir}/old-out.expected" "${dir}/old-out"
+    local tomorrow
+    tomorrow="$(date -v+1d '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date -d tomorrow '+%Y-%m-%d %H:%M:%S')"
+    printf '%s running `older test-lock` (pid 1) since %s\n' "$PWD" "$tomorrow" > "${dir}/${LOCK_DIR_NAME}/holder"
+    TEST_LOCK_ROOT="$dir" "$TEST_LOCK" status > "${dir}/future-out" 2> "${dir}/future-err"
+    printf 'held by %s running `older test-lock` (pid 1) since %s\n' "$PWD" "$tomorrow" > "${dir}/future-out.expected"
+    same_bytes "status: a start time later than now prints no held-for figure" "${dir}/future-out.expected" "${dir}/future-out"
     kill "$a_pid" 2>/dev/null
     wait "$a_pid" 2>/dev/null
 }
@@ -350,6 +446,22 @@ case_failed_wait_keeps_the_holder_record() {
     check "failed wait: the holder record still names the original holder" "other holder" "$(cat "${dir}/${LOCK_DIR_NAME}/holder")"
 }
 
+case_unlocked_run_is_not_flagged() {
+    local dir="${TMP_ROOT}/unlocked-long"
+    mkdir -p "${dir}/bin" "${dir}/${LOCK_DIR_NAME}"
+    chmod 700 "${dir}/${LOCK_DIR_NAME}"
+    printf '#!/bin/sh\nexit 1\n' > "${dir}/bin/flock"
+    chmod +x "${dir}/bin/flock"
+    write_dashboard_stub "${dir}/dashboard" "${dir}/calls" "${dir}/never"
+    PATH="${dir}/bin:${PATH}" CLAUDE_CODE_SESSION_ID=sess-unlocked TEST_LOCK_LONG_SECONDS=1 \
+        TEST_LOCK_DASHBOARD="${dir}/dashboard" TEST_LOCK_ROOT="$dir" "$TEST_LOCK" -- sleep 3 >/dev/null 2>"${dir}/err"
+    check "unlocked long run: exits with the command's exit code" "0" "$?"
+    printf 'test-lock: waiting — held by another test run\ntest-lock: could not take the lock — running unlocked\ntest-lock: released after Ns, exit 0\n' > "${dir}/err.expected"
+    normalise < "${dir}/err" > "${dir}/err.normalised"
+    same_bytes "unlocked long run: the transcript says it ran unlocked and has no flag" "${dir}/err.expected" "${dir}/err.normalised"
+    check "unlocked long run: no board note" "absent" "$([[ -e "${dir}/calls" ]] && echo present || echo absent)"
+}
+
 case_usage_errors() {
     "$TEST_LOCK" >/dev/null 2>&1
     check "usage: no arguments exits 2" "2" "$?"
@@ -359,6 +471,23 @@ case_usage_errors() {
     check "usage: --beat with no session exits 2" "2" "$?"
     "$TEST_LOCK" pnpm test >/dev/null 2>&1
     check "usage: a command without -- exits 2" "2" "$?"
+}
+
+case_bad_seconds_are_refused() {
+    local dir="${TMP_ROOT}/bad-seconds" name value rc marker
+    mkdir -p "$dir"
+    for name in TEST_LOCK_LONG_SECONDS TEST_LOCK_BEAT_SECONDS; do
+        for value in 0900 abc ""; do
+            marker="${dir}/ran-${name}-${#value}-${value:-empty}"
+            env "${name}=${value}" TEST_LOCK_ROOT="$dir" "$TEST_LOCK" -- touch "$marker" > "${dir}/out" 2> "${dir}/err"
+            rc=$?
+            check "seconds: ${name}='${value}' exits 2" "2" "$rc"
+            same_bytes "seconds: ${name}='${value}' prints nothing on stdout" /dev/null "${dir}/out"
+            printf "test-lock: %s must be a positive whole number of seconds, got '%s'\n" "$name" "$value" > "${dir}/err.expected"
+            same_bytes "seconds: ${name}='${value}' names the variable and its value" "${dir}/err.expected" "${dir}/err"
+            check "seconds: ${name}='${value}' never runs the command" "absent" "$([[ -e "$marker" ]] && echo present || echo absent)"
+        done
+    done
 }
 
 # A command that marks when it has started, then outlives any case that does not stop it. Its output
@@ -437,7 +566,11 @@ no_process_matching() {
 
 # Durations, pids and times vary run to run; everything else in a transcript is compared as it is.
 normalise() {
-    sed -E 's/(after) [0-9]+s/\1 Ns/; s/\(pid [0-9]+\)/(pid N)/; s/since [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9:]{8}/since TIME/'
+    sed -E 's/(after) [0-9]+s/\1 Ns/; s/\(pid [0-9]+\)/(pid N)/; s/since [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9:]{8}/since TIME/; s/held for [0-9hms]+/held for N/; s/lock for [0-9hms]+,/lock for Ns,/'
+}
+
+process_gone() {
+    ! pgrep -f -- "$1" >/dev/null
 }
 
 wait_for() {

@@ -16,6 +16,12 @@
 # too (`dashboard session heartbeat` finds the lead that spawned it), so `--beat` is only for
 # beating a session other than the caller's own.
 #
+# A run that has held the lock for TEST_LOCK_LONG_SECONDS (an hour by default) is flagged once on
+# stderr, because every other agent's tests wait behind it. When CLAUDE_CODE_SESSION_ID is set it
+# also tries a board note, which `dashboard item add` puts on the caller's own node, a teammate's
+# lead's node, or a node it opens for a caller that has neither; a note it refuses is reported on
+# stderr. The run is never stopped.
+#
 # Runs on macOS's /bin/bash 3.2: no {fd} redirections, no ${var@Q}.
 
 set -uo pipefail
@@ -24,10 +30,13 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LOCK_DIR="${TEST_LOCK_ROOT:-/tmp}/claude-agent-tests-$(id -u)"
 LOCK_FILE="${LOCK_DIR}/lock"
 HOLDER_FILE="${LOCK_DIR}/holder"
-BEAT_SECONDS="${TEST_LOCK_BEAT_SECONDS:-300}"
+BEAT_SECONDS="${TEST_LOCK_BEAT_SECONDS-300}"
+LONG_SECONDS="${TEST_LOCK_LONG_SECONDS-3600}"
+LONG_POLL_SECONDS=2
 DASHBOARD="${TEST_LOCK_DASHBOARD:-${SCRIPT_DIR}/dashboard}"
 CHILD_PID=""
 BEAT_PID=""
+LONG_PID=""
 
 main() {
     case "${1:-}" in
@@ -38,7 +47,7 @@ main() {
 }
 
 run_locked() {
-    local beat_session="${CLAUDE_CODE_SESSION_ID:-}" locker waited_from ran_from rc
+    local beat_session="${CLAUDE_CODE_SESSION_ID:-}" locker waited_from ran_from rc holding=""
     if [[ "$1" == "--beat" ]]; then
         [[ -n "${2:-}" ]] || usage
         beat_session="$2"
@@ -46,6 +55,8 @@ run_locked() {
     fi
     [[ "${1:-}" == "--" && $# -ge 2 ]] || usage
     shift
+    require_seconds TEST_LOCK_BEAT_SECONDS "$BEAT_SECONDS"
+    require_seconds TEST_LOCK_LONG_SECONDS "$LONG_SECONDS"
 
     # A run whose own tests call test-lock would otherwise wait on itself forever.
     if [[ -n "${TEST_LOCK_HELD:-}" ]]; then
@@ -65,23 +76,28 @@ run_locked() {
     fi
 
     start_beat "$beat_session"
-    trap stop_beat EXIT
+    trap stop_helpers EXIT
 
     waited_from="$(date +%s)"
     if lock_now "$locker"; then
         say "lock free — running"
         record_holder "$*"
+        holding=1
     else
         say "waiting — held by $(holder_description)"
         if lock_wait "$locker"; then
             say "acquired after $(duration_since "$waited_from") — running"
             record_holder "$*"
+            holding=1
         else
             say "could not take the lock — running unlocked"
         fi
     fi
 
     ran_from="$(date +%s)"
+    if [[ -n "$holding" ]]; then
+        start_long_watch "$*" "$ran_from"
+    fi
     run_command "$@"
     rc=$?
     exec 9>&-
@@ -98,7 +114,7 @@ print_status() {
     if lock_now "$locker"; then
         echo "free"
     else
-        echo "held by $(holder_description)"
+        echo "held by $(holder_description)$(held_for)"
     fi
     exit 0
 }
@@ -152,9 +168,57 @@ beat_loop() {
     done
 }
 
-stop_beat() {
+stop_helpers() {
     [[ -n "$BEAT_PID" ]] && kill "$BEAT_PID" 2>/dev/null
+    [[ -n "$LONG_PID" ]] && kill "$LONG_PID" 2>/dev/null
     return 0
+}
+
+start_long_watch() {
+    long_watch "$1" "$$" "$2" 9>&- &
+    LONG_PID=$!
+}
+
+# Flags the run once it has held the lock for LONG_SECONDS since ran_from, then exits. It checks
+# every LONG_POLL_SECONDS that test-lock is still alive, so a SIGKILLed test-lock's watcher exits
+# within one interval, unless another process takes that pid within the same interval. The flag is
+# a stderr line. The board note is tried only when CLAUDE_CODE_SESSION_ID is set, carries the
+# command cut to 400 characters and the directory cut to 200, and when `dashboard item add` exits
+# non-zero (no board installed, a lead lookup that failed, a refused note) that is said on stderr
+# and no note is posted.
+long_watch() {
+    local command="$1" parent="$2" ran_from="$3" sleep_pid="" now left held shown dir note
+    trap '[[ -n "$sleep_pid" ]] && kill "$sleep_pid" 2>/dev/null; exit 0' TERM
+
+    while :; do
+        kill -0 "$parent" 2>/dev/null || exit 0
+        now="$(date +%s)"
+        left=$((ran_from + LONG_SECONDS - now))
+        ((left <= 0)) && break
+        sleep "$((left < LONG_POLL_SECONDS ? left : LONG_POLL_SECONDS))" &
+        sleep_pid=$!
+        wait "$sleep_pid"
+    done
+
+    held="$(format_duration "$((now - ran_from))")"
+    say "still running after ${held} — ${command}"
+    [[ -n "${CLAUDE_CODE_SESSION_ID:-}" ]] || exit 0
+
+    shown="$(truncate_text "$command" 400)"
+    dir="$(truncate_text "$PWD" 200)"
+    note="$(printf 'One test run has held the test lock for %s, so every other agent'"'"'s tests are waiting behind it.\n\n`%s` in `%s`' "$held" "$shown" "$dir")"
+    if ! "$DASHBOARD" item add --type info --prompt "$note" >/dev/null; then
+        say "could not post the board note"
+    fi
+    exit 0
+}
+
+truncate_text() {
+    if ((${#1} > $2)); then
+        printf '%s...' "${1:0:$2}"
+    else
+        printf '%s' "$1"
+    fi
 }
 
 # The directory is created private to this user; it must be a real directory this user owns, or
@@ -210,8 +274,28 @@ holder_description() {
     echo "${line:-another test run}"
 }
 
+# The record's trailing "since YYYY-mm-dd HH:MM:SS" is the start time, the same record every
+# test-lock version reads. A record without it, one neither BSD nor GNU date can parse, or one whose
+# start is later than now (a holder in a zone ahead of the caller's, or a clock stepped back) has no
+# figure.
+held_for() {
+    local line since epoch pattern='since ([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2})$'
+    line="$(cat "$HOLDER_FILE" 2>/dev/null)"
+    [[ "$line" =~ $pattern ]] || return 0
+    since="${BASH_REMATCH[1]}"
+    epoch="$(date -j -f '%Y-%m-%d %H:%M:%S' "$since" +%s 2>/dev/null || date -d "$since" +%s 2>/dev/null)"
+    [[ "$epoch" =~ ^[0-9]+$ ]] || return 0
+    ((epoch <= $(date +%s))) || return 0
+    printf ' — held for %s' "$(duration_since "$epoch")"
+    return 0
+}
+
 duration_since() {
-    local s=$(($(date +%s) - $1))
+    format_duration "$(($(date +%s) - $1))"
+}
+
+format_duration() {
+    local s=$1
     if ((s >= 3600)); then
         printf '%dh%02dm' $((s / 3600)) $((s % 3600 / 60))
     elif ((s >= 60)); then
@@ -223,6 +307,13 @@ duration_since() {
 
 say() {
     printf 'test-lock: %s\n' "$*" >&2
+}
+
+require_seconds() {
+    if [[ ! "$2" =~ ^[1-9][0-9]*$ ]]; then
+        say "$1 must be a positive whole number of seconds, got '$2'"
+        exit 2
+    fi
 }
 
 usage() {

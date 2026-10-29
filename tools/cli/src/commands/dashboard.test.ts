@@ -658,6 +658,42 @@ test('CLI FLOW-425: a teammate with its own node beats it and its lead’s leaf'
   ])
 })
 
+test('CLI FLOW-453: a teammate with no node of its own posts its note to its lead’s node', () => {
+  upsertRegistryNode(LEAD_SESSION, {
+    internalId: 'lead-node-1',
+    externalId: `${LEAD_SESSION}_aaaa1111`,
+    key: null,
+    parentId: null,
+  })
+
+  const { status, stderr } = runCliAsTeammate(
+    ['dashboard', 'item', 'add', '--type', 'info', '--prompt', 'a run has held the lock for 1h00m'],
+    { AI_WORKFLOW_APP_BIN: writeBranchingStub(tmpDir, '', '{"itemId":"note-1"}') }
+  )
+
+  assert.equal(status, 0, stderr)
+  assert.deepEqual(readCalls(tmpDir), [
+    'item add --session lead-node-1 --type info --prompt a run has held the lock for 1h00m',
+  ])
+})
+
+test('CLI FLOW-453: a note from a teammate whose lead’s registry cannot be read refuses with that error and opens no node', () => {
+  mkdirSync(registryFilePath(LEAD_SESSION), { recursive: true })
+
+  const { status, stdout, stderr } = runCliAsTeammate(
+    ['dashboard', 'item', 'add', '--type', 'info', '--prompt', 'a run has held the lock for 1h00m'],
+    { AI_WORKFLOW_APP_BIN: writeBranchingStub(tmpDir, '[]', '{"itemId":"note-1"}') }
+  )
+
+  assert.equal(status, 1)
+  assert.equal(stdout, '')
+  assert.equal(
+    stderr,
+    `dashboard registry ${registryFilePath(LEAD_SESSION)} exists but could not be read (EISDIR)\n`
+  )
+  assert.deepEqual(readCalls(tmpDir), [])
+})
+
 test('CLI FLOW-425: an explicit --session naming the teammate’s own node still beats it', () => {
   upsertRegistryNode('flow425-teammate-session', {
     internalId: 'own-node-1',

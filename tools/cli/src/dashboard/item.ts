@@ -15,7 +15,14 @@ import {
   invokeDashboardRaw,
 } from './invoke.ts'
 import { findBoardNodeFor } from './board-nodes.ts'
-import { loadRegistry, RegistryUnreadableError, type RegistryNode } from './registry.ts'
+import {
+  loadRegistry,
+  registryLeaves,
+  registryRoot,
+  RegistryUnreadableError,
+  type RegistryNode,
+} from './registry.ts'
+import { resolveLeadSessionId } from './lead.ts'
 import {
   CONVERSATION_PHASE,
   corruptStateDiagnosis,
@@ -249,14 +256,23 @@ export const runItemAdd = (
   }
   const composedPrompt = composeItem()
   if (composedPrompt === null) return
+  const leadNode =
+    type === 'info' && session === undefined && key === undefined
+      ? teammateLeadNoteNode()
+      : undefined
+  if (leadNode === null) {
+    setRequestedExitCode(1)
+    return
+  }
+
   // A session no workflow entered still posts its questions to the board (contract rule 2), so
   // open its root node here rather than refuse with "run `dashboard session enter` first".
-  if (session === undefined && key === undefined) {
+  if (session === undefined && key === undefined && leadNode === undefined) {
     if (!ensureConversationNode(prompt, bin)) {
       return
     }
   }
-  const sessionId = resolveSessionTargetOrRefuse(session, key)
+  const sessionId = leadNode ?? resolveSessionTargetOrRefuse(session, key)
   if (sessionId === null) return
   if (stateFileIsCorrupt(sessionId)) {
     refuseCorruptState(sessionId, 'post this item')
@@ -424,6 +440,44 @@ const registryMayHoldNodes = (rawId: string): boolean => {
     }
     return true
   }
+}
+
+// A teammate has no board node of its own, so a note it posts goes to the node of the lead that
+// spawned it (lead.ts) rather than opening a stray node for the teammate. The lead's sole leaf
+// when it has one, else its root. undefined, so the note falls back to the caller's own node, when
+// this session has no session id, has a node of its own (or a registry that cannot be read), is not
+// a teammate, or has a lead whose registry holds no node. null when the process table or the lead's
+// registry could not be read: that is reported on stderr and the caller refuses, because a lead
+// that cannot be found is not evidence the teammate has none.
+const teammateLeadNoteNode = (): string | undefined | null => {
+  const rawId = tryResolveRawSessionId()
+  if (rawId === null || registryMayHoldNodes(rawId)) {
+    return undefined
+  }
+
+  const lead = resolveLeadSessionId()
+  if (lead === null) {
+    process.stderr.write(`could not read the process table to find this session's lead\n`)
+    return null
+  }
+
+  if (lead === undefined || lead === rawId) {
+    return undefined
+  }
+
+  let nodes: RegistryNode[]
+  try {
+    nodes = loadRegistry(lead)
+  } catch (err) {
+    if (!(err instanceof RegistryUnreadableError)) {
+      throw err
+    }
+    process.stderr.write(`${err.message}\n`)
+    return null
+  }
+
+  const leaves = registryLeaves(nodes)
+  return (leaves.length === 1 ? leaves[0] : registryRoot(nodes))?.internalId
 }
 
 const CONVERSATION_LOCK_NAME = 'conversation-node.lock'

@@ -109,7 +109,8 @@ take turns running tests. It reads these:
 | Variable | What it does |
 |---|---|
 | `TEST_LOCK_ROOT` | The directory the lock is kept under, in a subdirectory private to you. Default: `/tmp`. |
-| `TEST_LOCK_BEAT_SECONDS` | Seconds between the heartbeats it sends the board for the agent's session (and a teammate's lead's) while its tests wait or run. Default: `300`. |
+| `TEST_LOCK_BEAT_SECONDS` | Seconds between the heartbeats it sends the board for the agent's session (and a teammate's lead's) while its tests wait or run. A positive whole number; any other value is refused with exit 2 before the command runs. Default: `300`. |
+| `TEST_LOCK_LONG_SECONDS` | Seconds a run may hold the lock before `test-lock` flags it, once, on stderr, and also tries a board note when `CLAUDE_CODE_SESSION_ID` is set (on the agent's own node, a teammate's lead's node, or a node opened for an agent that has neither; a note the board refuses is reported on stderr). The run is never stopped. A positive whole number; any other value is refused with exit 2 before the command runs. Default: `3600`. |
 | `TEST_LOCK_DASHBOARD` | The `dashboard` command it sends those heartbeats with. Default: the plugin's own `bin/dashboard`. |
 | `TEST_LOCK_HELD` | `test-lock` sets it to `1` for the command it runs, so a `test-lock` inside that command does not wait on itself. Any non-empty value, even one that is only spaces, skips the lock, so leave it unset. |
 
