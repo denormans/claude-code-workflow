@@ -24,12 +24,13 @@ it creates the node it is asked for. What follows is the judgement it is trustin
 - **A ticket gets its own child node only under a real epic-root node** (a multi-story epic whose epic was entered as the root). A ticket that is itself the root — or that merely belongs to a Jira epic with no epic-root *node* above it this session — re-enters the root (no `--key`). Jira epic membership is never by itself the trigger.
 - **A PR gets no node of its own.** PR Lifecycle / PR Feedback re-enter the **ticket node** with a PR phase. A distinct PR node (`--key "<branch>"`) is created **only** when one ticket produces multiple PRs (e.g. a multi-repo story), and it ends when its PR merges (PR Lifecycle's `MERGED` handler), with Team Cleanup ending any that remain.
 - **A root is released when the unit of work it names is done — a standalone ticket at its own
-  close, or an epic once its last story closes.** Release it (`dashboard session leave --root`)
-  before entering a new one — keying new, unrelated work under it instead is how a `DEV-3866` branch
-  ends up under a `DEV-3867` node. Before that point, an epic's root stays live across every story
-  under it: moving from one story to the next leaves the current story's own keyed node (no `--root`)
-  and re-enters the next story keyed under the same still-live epic root (see `team-cleanup`'s
-  Auto-Continue step).
+  close, or an epic once its last story closes, and in both cases only after that close's Team
+  Cleanup review has finished (`skills/team-cleanup/SKILL.md` §6. Delete Local Branch).** Release
+  it (`dashboard session leave --root`) before entering a new one — keying new, unrelated work
+  under it instead is how a `DEV-3866` branch ends up under a `DEV-3867` node. Before that point,
+  an epic's root stays live across every story under it: moving from one story to the next leaves
+  the current story's own keyed node (no `--root`) and re-enters the next story keyed under the
+  same still-live epic root (see `team-cleanup`'s Auto-Continue step).
 
 Net: **one ticket + one PR = one node.** Extra levels appear only for a genuine multi-story epic or a genuine multi-PR ticket.
 

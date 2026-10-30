@@ -30,6 +30,8 @@ Clean up after a story is complete — run a process & memory review, remove wor
 
 Run the end-of-project review **before anything is torn down**. It has two tiers; pick the tier from whether the whole unit of work is finishing.
 
+**Finished, not started.** Every skill this step invokes runs to completion before step 2 begins — and so before any `dashboard session leave` in step 6. A review handed to an agent or a background task is finished only once its result has arrived; one still running is not done, whatever its place on this page.
+
 **First, close the story in Jira** (when Jira is configured) — but only on a condition you can observe: every PR this story registered is merged (`gh pr view "<n>" --repo "<owner/repo>" --json state` reads `MERGED` for each pair in the Input above), or the user explicitly confirmed the work complete. Anything else — a PR closed without merging, a pair whose state cannot be read, a run with no PR and no such confirmation — closes nothing, and says so in-session. When the condition holds, transition the story to Done per `skills/workflow-guide/references/routing.md` §Cross-Phase Rule: The Workflow Moves Its Own Tickets, which also says how a failure is reported; a failure never holds up the rest of cleanup. The story is **confirmed closed** when that section's re-read shows `done`, or when the ticket was already `done` — the epic close below depends on it.
 
 **Determine the tier.** `wholeUnitClosing` is true when this story is a standalone story, or when its epic has no remaining children by the derivation below.
@@ -202,11 +204,13 @@ dashboard session enter --phase cleanup --key "$STORY_NODE_KEY"
 
 **A multi-PR story ends every PR node still open under it before either `leave` below.** For each branch name in the Input, the key is that branch name, or `<branch-name>-<repo-name>` with no ticket (PR Lifecycle step 1). Run `dashboard item list-deferred --key "<key>"` first. It only reads. If it reports `no active node with key`, that PR's node already ended, so skip it. Otherwise run `dashboard session enter --phase cleanup --key "<key>"`, drain its queue with the same flush, wait and consume loop as the paragraph above, using `--key "<key>"`, then run `dashboard session leave --key "<key>"`. A single-PR story has no PR node and skips this paragraph.
 
-Standalone path — story-node queue flushed and consumed (the flush paragraph above) and every PR node ended (the PR-node paragraph above); leave now:
+**Every `leave` below waits on step 1's review, finished — not merely started** (step 1, *Finished, not started*). The story leaf's `leave` needs the light tier finished. Each `leave --root` — the standalone close and the epic release alike, both whole-unit closes — also needs the heavy tier finished: the consolidate pass has appended its Consolidated Digest to the notes file, and heavy Memory Review has returned, its closing integrity check included. While either is still running the root stays live; let it finish, then leave.
+
+Standalone path — step 1's light and heavy tiers finished, story-node queue flushed and consumed (the flush paragraph above) and every PR node ended (the PR-node paragraph above); leave now:
 ```bash
 dashboard session leave --root
 ```
-Child path (`STORY_NODE_KEY` re-resolved again — the wait for a human answer above spans separate shell invocations, and a shell variable does not survive between them, `skills/board/references/dashboard-protocol.md` §1) — story-node queue flushed and consumed (the flush paragraph above) and every PR node ended (the PR-node paragraph above); leave now:
+Child path (`STORY_NODE_KEY` re-resolved again — the wait for a human answer above spans separate shell invocations, and a shell variable does not survive between them, `skills/board/references/dashboard-protocol.md` §1) — step 1's light tier finished, story-node queue flushed and consumed (the flush paragraph above) and every PR node ended (the PR-node paragraph above); leave now:
 ```bash
 STORY_NODE_KEY="$(dashboard session key --ticket "<CURRENT-STORY-ID>" --require)" || exit 1
 dashboard session leave --key "$STORY_NODE_KEY"
@@ -217,7 +221,7 @@ dashboard session leave --key "$STORY_NODE_KEY"
 ```bash
 dashboard session enter --phase cleanup
 ```
-**These two commands are not one unit — do not run them back to back.** With phase `cleanup` now entered on the root, run the same list-deferred/flush/wait/consume loop described in the paragraph above, on the root (no `--key`), and reach an empty `list-deferred` with no item from any flush still open before the `leave --root` below — a flush that is only posted, not yet answered, is discarded by that `leave` exactly as the paragraph above warns:
+**These two commands are not one unit — do not run them back to back.** With phase `cleanup` now entered on the root, run the same list-deferred/flush/wait/consume loop described in the paragraph above, on the root (no `--key`), and reach an empty `list-deferred` with no item from any flush still open before the `leave --root` below — a flush that is only posted, not yet answered, is discarded by that `leave` exactly as the paragraph above warns. Run it only once step 1's heavy tier has finished, as for every `leave` here:
 ```bash
 dashboard session leave --root
 ```
@@ -276,6 +280,7 @@ If the current story is part of an epic and the live remaining-stories list deri
 ## Key Rules
 
 - **Review first** — always run the process & memory review before tearing down the environment
+- **Board session ends last** — no `dashboard session leave`, and above all no `leave --root`, until step 1's review has finished; a review still running in an agent or background task has not finished
 - **Warn, don't force** — if a worktree has uncommitted changes, ask the user before removing
 - **Verify shutdown** — don't leave zombie agents; verify within a bounded wait in the same turn, never by ending the turn to wait for an acknowledgment; kill an unresponsive pane-backed teammate's process, and notify the user only if it survives the kill
 - **Teardown is the per-agent handshake, falling back to a kill of an unresponsive pane-backed teammate** — `shutdown_request` to every tracked agent from a durable roster; there is no one-call team-teardown tool. Verify no zombies against the team config + process list before finishing
