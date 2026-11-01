@@ -20,6 +20,13 @@ import {
   type SubagentStat,
 } from './per-ticket.ts'
 import { formatNumber, formatTitle, renderTable, shortenModel } from './table.ts'
+import {
+  createWholeReadCollector,
+  formatWholeReadJson,
+  formatWholeReadTable,
+  summarizeWholeReads,
+  type WholeReadReport,
+} from './whole-reads.ts'
 
 type TokenUsage = {
   inputTokens: number
@@ -95,6 +102,7 @@ export type UsageReport = {
   rows: UsageRow[]
   perTicket?: PerTicketReport
   subagentStats?: SubagentStat[]
+  wholeReads?: WholeReadReport
 }
 
 // A sink for one output channel. Defaults to the real process stream; tests substitute a collector
@@ -122,6 +130,7 @@ type ClaudeUsageOptions = {
   project?: string
   perTicket?: boolean
   subagents?: boolean
+  wholeReads?: boolean
   stdout?: Writer
   stderr?: Writer
 }
@@ -156,13 +165,21 @@ export const runClaudeUsage = async (options: ClaudeUsageOptions): Promise<void>
   const stderr = options.stderr ?? writeToStderr
   const report = await collectClaudeUsage(options)
   const includeSubagents = options.subagents === true
-  stdout(
-    options.json
-      ? formatJson(report, includeSubagents)
-      : report.perTicket !== undefined
-        ? formatPerTicketReport(report.perTicket, includeSubagents, report.subagentStats ?? [])
-        : formatUsageTable(report.rows)
-  )
+  if (report.wholeReads !== undefined) {
+    stdout(
+      options.json
+        ? formatWholeReadJson(report.wholeReads)
+        : formatWholeReadTable(report.wholeReads)
+    )
+  } else {
+    stdout(
+      options.json
+        ? formatJson(report, includeSubagents)
+        : report.perTicket !== undefined
+          ? formatPerTicketReport(report.perTicket, includeSubagents, report.subagentStats ?? [])
+          : formatUsageTable(report.rows)
+    )
+  }
   if (!options.json) {
     // filesScanned and malformedLines are counted before the project-scope filter runs (see
     // collectClaudeUsage) and are genuinely scan-wide. uniqueRequests and duplicateEntries are
@@ -200,6 +217,7 @@ export const collectClaudeUsage = async (
   const spawnedAgentParents = new Map<string, string>()
   const ambiguousSpawnedAgents = new Set<string>()
   const attributionIndex = createAttributionIndex()
+  const wholeReadCollector = createWholeReadCollector()
   const attributionCache = new Map<string, Attribution>()
   const attributionFor = (rawSessionId: string): Attribution => {
     const cached = attributionCache.get(rawSessionId)
@@ -234,6 +252,18 @@ export const collectClaudeUsage = async (
       } catch {
         malformedLines += 1
         continue
+      }
+
+      if (
+        options.wholeReads === true &&
+        (scanAllProjects || withinProjectScope(record, options.projectDirectory)) &&
+        (options.project === undefined ||
+          project.toLowerCase().includes(options.project.toLowerCase()))
+      ) {
+        wholeReadCollector.add(record, {
+          subagent: !ownTranscript,
+          date: recordDate(record, options.utc),
+        })
       }
 
       const sessionName = parseSessionName(record)
@@ -296,6 +326,17 @@ export const collectClaudeUsage = async (
   // silently missing every project key that was seen only in a spawn prompt.
   populateProjectKeys(attributionIndex, options.claudeDir)
 
+  const wholeReads =
+    options.wholeReads === true
+      ? summarizeWholeReads(
+          wholeReadCollector.events(),
+          (sessionId) => attributionFor(sessionId).role,
+          (date) =>
+            (options.since === undefined || date >= options.since) &&
+            (options.until === undefined || date <= options.until)
+        )
+      : undefined
+
   const filtered = Array.from(responses.values())
     .map((response) =>
       attachParentSession(response, teammateAgents, spawnedAgentParents, ambiguousSpawnedAgents)
@@ -328,6 +369,7 @@ export const collectClaudeUsage = async (
     recordsOutOfScope,
     rows,
     ...(perTicket === undefined ? {} : { perTicket }),
+    ...(wholeReads === undefined ? {} : { wholeReads }),
     ...(perTicket !== undefined && options.subagents
       ? { subagentStats: buildSubagentStats(perTicket.tickets) }
       : {}),
@@ -662,6 +704,15 @@ const formatDate = (date: Date, utc: boolean): string => {
   const month = (utc ? date.getUTCMonth() : date.getMonth()) + 1
   const day = utc ? date.getUTCDate() : date.getDate()
   return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+}
+
+const recordDate = (record: TranscriptRecord, utc: boolean): string | undefined => {
+  if (typeof record.timestamp !== 'string') {
+    return undefined
+  }
+
+  const timestamp = new Date(record.timestamp)
+  return Number.isNaN(timestamp.valueOf()) ? undefined : formatDate(timestamp, utc)
 }
 
 const tokenCount = (value: unknown): number => {

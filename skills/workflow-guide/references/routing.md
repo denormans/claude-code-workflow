@@ -77,6 +77,12 @@ Reading an image or PDF artifact (a screenshot, a rendered frame, a PDF) with `R
 
 This is enforced, not advised: `hooks/artifact-read-guard.sh` blocks a `Read` of an image or PDF path from any context except the viewer's own, and its refusal names the viewer. A path can still be passed around, attached, uploaded or cited freely. Only reading its contents is routed.
 
+## Large-File Reads
+
+A whole `Read` of a large text file is refused in a long-lived session: the main session, a team lead, an implementer or the senior engineer. A file read whole there is re-sent on every later request until compaction. Read the part you need instead (`Read` with `offset` and `limit`, after `Grep -n` finds the lines), search it with `Grep`, or hand the path and the question to a `researcher` sub-agent as Research Delegation above describes. A ranged read of the lines you change is enough for `Edit`.
+
+This is enforced, not advised: `hooks/large-read-gate.sh` refuses the read, and the habitual shell print of one (for example `cat big.md`, `cat -n big.md` or `cd docs && cat big.md`), when the file is a text file over `LARGE_READ_GATE_MAX_BYTES` (default 20,000 bytes; `0` turns the gate off, and a project can set it in its settings `env`). It allows a sub-agent's reads, the user's `.claude/review-standards.md`, and this plugin's own skill, agent and command files, whose reference files skills mark mandatory reading. Which shell forms it recognises is best-effort and defined by the hook's `printed_file`; a form it does not recognise passes. The gate stops the habitual whole read, not a deliberate workaround. Its refusal names the way forward.
+
 ## Orchestrator Anti-patterns
 
 Recurring patterns that erode workflow quality. Watch for these in your own behavior:

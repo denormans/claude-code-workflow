@@ -461,7 +461,12 @@ const tagSequence = (svg) => {
   if (window.mermaid) {
     mermaid.initialize({ startOnLoad: false, theme: 'base', themeVariables: ${JSON.stringify(theme)} })
     await mermaid.run()
-    document.querySelectorAll('.mermaid > svg').forEach(tagSequence)
+    // Mermaid caps its SVG at the diagram's natural width with an inline max-width. Without it
+    // the SVG fills the diagram area and its viewBox scales the drawing to fit.
+    document.querySelectorAll('.mermaid > svg').forEach((svg) => {
+      svg.style.removeProperty('max-width')
+      tagSequence(svg)
+    })
   }
   const tl = gsap.timeline({ paused: true })
   for (const { at, target, vars, duration } of tweens) {
@@ -492,7 +497,7 @@ li { margin-bottom: 28px; }
   height: ${area.height}px; margin: 0; overflow: hidden; }
 .diagram > svg { width: 100%; height: 100%; }
 .mermaid { display: flex; align-items: center; justify-content: center; }
-.mermaid svg { max-width: 100%; max-height: 100%; }
+.mermaid > svg { width: 100%; height: 100%; }
 ${captioned ? captionStyle : ''}`
 
 // The caption band starts at 1080 - 40 - 2 x 40 x 1.3 = 936px. Bullets are set so that six bullets

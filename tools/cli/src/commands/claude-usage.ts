@@ -18,7 +18,8 @@ export const claudeUsageCommand = buildCommand({
       'day/session/model. --subagents, with --per-ticket, adds the cost per sub-agent type. ' +
       '--project filters to sessions whose Claude project directory contains ' +
       'the given substring, and implies --all -- naming a project means you want that project, ' +
-      "not the current directory's.",
+      "not the current directory's." +
+      ' --whole-reads instead reports whole-file and, separately, ranged Read results over 24,000 characters and large-read gate refusals per role.',
   },
   parameters: {
     flags: {
@@ -51,6 +52,10 @@ export const claudeUsageCommand = buildCommand({
         kind: 'boolean',
         brief: 'With --per-ticket, also report cost per sub-agent type',
       },
+      'whole-reads': {
+        kind: 'boolean',
+        brief: 'Report large whole-file and ranged reads and large-read gate refusals per role',
+      },
       project: {
         kind: 'parsed',
         parse: parseNonBlankString('--project'),
@@ -69,10 +74,16 @@ export const claudeUsageCommand = buildCommand({
     all: boolean
     'per-ticket': boolean
     subagents: boolean
+    'whole-reads': boolean
     project?: string
   }) {
     if (flags.subagents && !flags['per-ticket']) {
       process.stderr.write('claude-usage: --subagents requires --per-ticket\n')
+      setRequestedExitCode(1)
+      return
+    }
+    if (flags['whole-reads'] && flags['per-ticket']) {
+      process.stderr.write('claude-usage: --whole-reads cannot be combined with --per-ticket\n')
       setRequestedExitCode(1)
       return
     }
@@ -87,6 +98,7 @@ export const claudeUsageCommand = buildCommand({
       json: flags.json,
       perTicket: flags['per-ticket'],
       subagents: flags.subagents,
+      wholeReads: flags['whole-reads'],
       project: flags.project,
     })
   },

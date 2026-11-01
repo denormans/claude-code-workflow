@@ -64,13 +64,13 @@ import shlex
 import sys
 
 # FLOW-225 design decision: this segment tokenizer is duplicated, not extracted into a shared
-# module, across six hooks -- see dashboard-enter-guard.sh (the canonical copy) for the full
+# module, across seven hooks -- see dashboard-enter-guard.sh (the canonical copy) for the full
 # reasoning.
 
 def raw_substitution_spans(command):
-    # Defined in all six hooks for the shared-analyzer byte-identical convention, but only
+    # Defined in all seven hooks for the shared-analyzer byte-identical convention, but only
     # called by the three unconditional hooks (dangerous-command-guard.sh, no-verify-guard.sh,
-    # pr-merge-guard.sh) -- dead code in the other three, on purpose; look for the call site in
+    # pr-merge-guard.sh) -- dead code in the other four, on purpose; look for the call site in
     # THIS hook's own tail before assuming it's used here.
     #
     # shlex has no notion of command substitution, and by

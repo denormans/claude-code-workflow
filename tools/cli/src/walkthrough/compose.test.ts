@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { JSDOM } from 'jsdom'
+import { JSDOM, type DOMWindow } from 'jsdom'
 import { CAPTIONED_DIAGRAM_AREA, DIAGRAM_AREA, composeHtml, timeScenes } from './compose.ts'
 import { prepareScript, type PreparedScene } from './prepare.ts'
 import type { Alignment } from './narration.ts'
@@ -516,29 +516,7 @@ test('composeHtml: a sequence is whole until the first cue, then lights each par
   const html = composeHtml('T', 'classic', timed)
   const tweens: { at: number; target: string; vars: Record<string, unknown>; duration?: number }[] =
     JSON.parse(/const tweens = (.*)\n/.exec(html)?.[1] ?? '[]')
-  const fixture = readFileSync(
-    new URL('./fixtures/sequence-mermaid-12.svg', import.meta.url),
-    'utf-8'
-  )
-  const { window } = new JSDOM(html, { runScripts: 'outside-only' })
-  window.eval(
-    readFileSync(createRequire(import.meta.url).resolve('gsap/dist/gsap.min.js'), 'utf-8')
-  )
-  // Stands in for Mermaid's render, which needs a browser's layout, with Mermaid 12's own output.
-  Object.assign(window, {
-    mermaid: {
-      initialize: () => undefined,
-      run: async () => {
-        for (const pre of window.document.querySelectorAll('pre.mermaid')) {
-          pre.innerHTML = fixture
-        }
-      },
-    },
-  })
-  window.eval(/<script>([\s\S]*?)<\/script>/.exec(html)?.[1] ?? '')
-  for (let i = 0; i < 10 && window.__timelines === undefined; i++) {
-    await new Promise((resolve) => setImmediate(resolve))
-  }
+  const window = await loadSequencePage(html)
   const timeline = window.__timelines.walkthrough
   const doc = window.document
   const [scene] = timed
@@ -600,6 +578,38 @@ test('composeHtml: a sequence is whole until the first cue, then lights each par
       YELLOW
     )
     assert.equal((label('render') as SVGElement | null)?.style.fill, '')
+  } finally {
+    window.close()
+  }
+})
+
+test('composeHtml: a sequence fills the diagram area rather than keeping its natural width', async () => {
+  const scenes = await prepareScript({
+    title: 'T',
+    palette: 'classic',
+    scenes: [
+      {
+        heading: 'S',
+        narration: 'The renderer starts.',
+        visual: { kind: 'sequence', mermaid: SEQUENCE },
+        steps: [],
+      },
+    ],
+  })
+  const html = composeHtml(
+    'T',
+    'classic',
+    timeScenes(
+      scenes,
+      scenes.map(({ narration }) => ({ audio: 'a.mp3', alignment: alignmentOf(narration) }))
+    )
+  )
+  const window = await loadSequencePage(html)
+  try {
+    const svg = window.document.querySelector('#scene-0 .mermaid > svg')
+    assert.ok(svg !== null, 'the sequence rendered')
+    const { maxWidth, width, height } = window.getComputedStyle(svg)
+    assert.deepEqual([maxWidth, width, height], ['none', '100%', '100%'])
   } finally {
     window.close()
   }
@@ -696,3 +706,31 @@ test('composeHtml: a silent walkthrough lets a caption break inside a word', () 
   )
   assert.match(style, /\.caption \{[^}]*overflow-wrap: anywhere;[^}]*\}/)
 })
+
+// Loads a composed page with GSAP and a stand-in for Mermaid's render, which needs a browser's
+// layout, that draws Mermaid 12's own output, and waits for the page's timeline.
+const loadSequencePage = async (html: string): Promise<DOMWindow> => {
+  const fixture = readFileSync(
+    new URL('./fixtures/sequence-mermaid-12.svg', import.meta.url),
+    'utf-8'
+  )
+  const { window } = new JSDOM(html, { runScripts: 'outside-only' })
+  window.eval(
+    readFileSync(createRequire(import.meta.url).resolve('gsap/dist/gsap.min.js'), 'utf-8')
+  )
+  Object.assign(window, {
+    mermaid: {
+      initialize: () => undefined,
+      run: async () => {
+        for (const pre of window.document.querySelectorAll('pre.mermaid')) {
+          pre.innerHTML = fixture
+        }
+      },
+    },
+  })
+  window.eval(/<script>([\s\S]*?)<\/script>/.exec(html)?.[1] ?? '')
+  for (let i = 0; i < 10 && window.__timelines === undefined; i++) {
+    await new Promise((resolve) => setImmediate(resolve))
+  }
+  return window
+}

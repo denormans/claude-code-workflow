@@ -29,9 +29,9 @@ if [[ -z "$COMMAND" ]]; then
   exit 0  # No command, allow
 fi
 
-# Segment-scoped match (FLOW-228): tokenize with the same shlex-based segment analyzer five other
+# Segment-scoped match (FLOW-228): tokenize with the same shlex-based segment analyzer six other
 # hooks already share (FLOW-225; see dashboard-enter-guard.sh for the canonical copy and the
-# duplication rationale -- six hooks total after this port) and block when pkill or killall
+# duplication rationale -- seven hooks total) and block when pkill or killall
 # appears as a bare token ANYWHERE in a segment, not only at command position. Command-position
 # matching needs a wrapper-word enumeration (sudo, xargs, timeout, ...), and that enumeration is
 # what produced five fail-opens here: `>/dev/null pkill`, `2>/dev/null pkill`, `if pkill`,
@@ -87,13 +87,13 @@ if command -v python3 >/dev/null 2>&1; then
 import bisect, re, shlex, sys
 
 # FLOW-225 design decision: this segment tokenizer is duplicated, not extracted into a shared
-# module, across six hooks -- see dashboard-enter-guard.sh (the canonical copy) for the full
+# module, across seven hooks -- see dashboard-enter-guard.sh (the canonical copy) for the full
 # reasoning.
 
 def raw_substitution_spans(command):
-    # Defined in all six hooks for the shared-analyzer byte-identical convention, but only
+    # Defined in all seven hooks for the shared-analyzer byte-identical convention, but only
     # called by the three unconditional hooks (dangerous-command-guard.sh, no-verify-guard.sh,
-    # pr-merge-guard.sh) -- dead code in the other three, on purpose; look for the call site in
+    # pr-merge-guard.sh) -- dead code in the other four, on purpose; look for the call site in
     # THIS hook's own tail before assuming it's used here.
     #
     # shlex has no notion of command substitution, and by

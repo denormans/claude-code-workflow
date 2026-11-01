@@ -63,21 +63,21 @@ import bisect, re, shlex, sys
 # FLOW-225 design decision: this segment tokenizer (strip_shell_meta / normalize_bin /
 # is_interpreter / line_fragments / is_data_sink / is_outside_quotes / strip_heredocs /
 # is_boundary and the segment-building loop) is duplicated, not extracted into a shared module,
-# across six hooks -- this file, pr-title-guard.sh, no-verify-guard.sh, pr-merge-guard.sh,
-# pr-lifecycle-guard.sh, and dangerous-command-guard.sh (FLOW-228). Each hook is invoked directly by
-# absolute path by the Claude Code harness, so a source'd or imported helper introduces a failure
-# mode the current design does not have: a hook that cannot find its dependency fails IN THE
-# HARNESS, silently disabling the guard, not in a test where someone is watching. The duplication
-# cost is real -- six copies of roughly 150 lines each, paid six times over across this ticket's
-# several rounds of fixes -- and was weighed against that failure mode directly. Duplication was
-# kept. This is the canonical copy; the other five are code-identical ports of it — the comments
-# are localised to each hook's own guarded command — each carrying a short comment pointing back
-# here rather than repeating this reasoning in full.
+# across seven hooks -- this file, pr-title-guard.sh, no-verify-guard.sh, pr-merge-guard.sh,
+# pr-lifecycle-guard.sh, dangerous-command-guard.sh (FLOW-228), and large-read-gate.sh (FLOW-455).
+# Each hook is invoked directly by absolute path by the Claude Code harness, so a source'd or
+# imported helper introduces a failure mode the current design does not have: a hook that cannot
+# find its dependency fails IN THE HARNESS, silently disabling the guard, not in a test where
+# someone is watching. The duplication cost is real -- seven copies of roughly 150 lines each,
+# paid seven times over across this ticket's several rounds of fixes -- and was weighed against
+# that failure mode directly. Duplication was kept. This is the canonical copy; the other six are
+# code-identical ports of it — the comments are localised to each hook's own guarded command —
+# each carrying a short comment pointing back here rather than repeating this reasoning in full.
 
 def raw_substitution_spans(command):
-    # Defined in all six hooks for the shared-analyzer byte-identical convention, but only
+    # Defined in all seven hooks for the shared-analyzer byte-identical convention, but only
     # called by the three unconditional hooks (dangerous-command-guard.sh, no-verify-guard.sh,
-    # pr-merge-guard.sh) -- dead code in the other three, on purpose; look for the call site in
+    # pr-merge-guard.sh) -- dead code in the other four, on purpose; look for the call site in
     # THIS hook's own tail before assuming it's used here.
     #
     # shlex has no notion of command substitution, and by

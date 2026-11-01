@@ -8,7 +8,7 @@
     {
       "name": "workflow",
       "description": "Workflow skills, hooks, agents, and tools for Claude Code",
-      "version": "1.104.2",
+      "version": "1.105.0",
       "license": "GPL-3.0-or-later",
       "source": "./"
     }

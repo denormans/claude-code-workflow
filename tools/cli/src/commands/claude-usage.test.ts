@@ -282,3 +282,84 @@ test('CLI: claude-usage without --per-ticket renders the day/session/model table
     rmSync(claudeDir, { recursive: true, force: true })
   }
 })
+
+test('CLI: claude-usage --whole-reads with --per-ticket is refused with its own stderr line', () => {
+  const claudeDir = emptyClaudeDir()
+  try {
+    const { stdout, stderr, status } = runCli(['--whole-reads', '--per-ticket'], claudeDir)
+    assert.equal(status, 1)
+    assert.equal(stdout, '')
+    assert.equal(stderr, 'claude-usage: --whole-reads cannot be combined with --per-ticket\n')
+  } finally {
+    rmSync(claudeDir, { recursive: true, force: true })
+  }
+})
+
+test('CLI: claude-usage --whole-reads --json prints the whole-read report for a large whole Read', () => {
+  const claudeDir = mkdtempSync(join(tmpdir(), 'claude-usage-cmd-whole-reads-test-'))
+  const projectDir = join(claudeDir, 'projects', 'project-one')
+  mkdirSync(projectDir, { recursive: true })
+  const timestamp = '2026-11-01T12:00:00Z'
+  const records = [
+    {
+      type: 'assistant',
+      sessionId: 'session-one',
+      timestamp,
+      message: {
+        content: [
+          { type: 'tool_use', id: 'read-1', name: 'Read', input: { file_path: '/repo/big.md' } },
+        ],
+      },
+    },
+    {
+      type: 'user',
+      sessionId: 'session-one',
+      timestamp,
+      message: {
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'read-1',
+            content: 'x'.repeat(24001),
+            is_error: false,
+          },
+        ],
+      },
+    },
+  ]
+  writeFileSync(
+    join(projectDir, 'session-one.jsonl'),
+    `${records.map((record) => JSON.stringify(record)).join('\n')}\n`
+  )
+
+  try {
+    const { stdout, stderr, status } = runCli(
+      ['--whole-reads', '--all', '--utc', '--json'],
+      claudeDir
+    )
+    assert.equal(status, 0)
+    assert.equal(stderr, '')
+    assert.equal(
+      stdout,
+      [
+        '{',
+        '  "minChars": 24000,',
+        '  "rows": [',
+        '    {',
+        '      "role": "solo",',
+        '      "wholeReads": 1,',
+        '      "chars": 24001,',
+        '      "rangedReads": 0,',
+        '      "rangedChars": 0,',
+        '      "refusals": 0,',
+        '      "filesRefusedTwice": 0',
+        '    }',
+        '  ]',
+        '}',
+        '',
+      ].join('\n')
+    )
+  } finally {
+    rmSync(claudeDir, { recursive: true, force: true })
+  }
+})
