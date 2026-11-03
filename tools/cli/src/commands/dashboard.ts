@@ -25,6 +25,7 @@ import {
   runLeave,
   runLinkAdd,
 } from '../dashboard/lifecycle.ts'
+import { readStdin, runWait } from '../dashboard/background-wait.ts'
 import { runReadAnswers, runReadComments } from '../dashboard/read.ts'
 import { runStatus } from '../dashboard/status.ts'
 import { runRepair } from '../dashboard/repair.ts'
@@ -60,6 +61,29 @@ const heartbeatCommand = buildCommand({
   },
   func(flags: { session?: string }) {
     runHeartbeat(flags.session)
+  },
+})
+
+const waitCommand = buildCommand({
+  docs: {
+    brief:
+      'Record this session as waiting on its own background work (Stop payload on stdin), or clear it',
+  },
+  parameters: {
+    flags: {
+      session: sessionFlag,
+      clear: { kind: 'boolean', default: false, brief: 'Clear the wait: the session resumed' },
+      'recorded-before': {
+        kind: 'parsed',
+        parse: parseNonBlankString('--recorded-before'),
+        brief: 'With --clear, clear only a wait recorded before this ISO instant',
+        optional: true,
+      },
+    },
+    positional: { kind: 'tuple', parameters: [] },
+  },
+  func(flags: { session?: string; clear: boolean; 'recorded-before'?: string }) {
+    runWait(flags.session, flags.clear ? null : readStdin(), flags['recorded-before'])
   },
 })
 
@@ -324,6 +348,7 @@ const sessionRoutes = buildRouteMap({
     'refresh-return': refreshReturnCommand,
     leave: leaveCommand,
     heartbeat: heartbeatCommand,
+    wait: waitCommand,
     pause: pauseCommand,
     resume: resumeCommand,
     end: endCommand,

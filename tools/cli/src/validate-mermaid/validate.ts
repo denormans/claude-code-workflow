@@ -27,16 +27,26 @@ export const validateMermaid = async (code: string): Promise<ValidationResult> =
     }
   })
 
+export interface SequenceMessage {
+  from: string
+  to: string
+}
+
 export interface SequenceIds {
   participants: string[]
-  messages: number
+  // In source order, so a step's message index points into it.
+  messages: SequenceMessage[]
 }
+
+// Whether a step id is a message index: a canonical non-negative integer, with no leading zeros.
+export const isMessageIndex = (id: string): boolean => /^(0|[1-9]\d*)$/.test(id)
 
 // Mermaid's LINETYPE.NOTE: a note names participants but is not a message between them.
 const NOTE = 2
 
-// A sequence's participant ids, and how many messages it has. A message runs from one participant to
-// another, so notes, blocks and activations are not counted. The source must already parse.
+// A sequence's participant ids, and each message's sender and receiver. A message runs from one
+// participant to another, so notes, blocks and activations are not messages. The source must
+// already parse.
 export const readSequence = async (code: string): Promise<SequenceIds> =>
   withDomGlobals(async () => {
     const { db } = await (await getMermaid()).mermaidAPI.getDiagramFromText(code)
@@ -44,7 +54,7 @@ export const readSequence = async (code: string): Promise<SequenceIds> =>
     const signals = callDb(db, 'getMessages')
     return {
       participants: actors instanceof Map ? [...actors.keys()].map(String) : [],
-      messages: Array.isArray(signals) ? signals.filter(isMessage).length : 0,
+      messages: Array.isArray(signals) ? signals.flatMap(messageOf) : [],
     }
   })
 
@@ -76,9 +86,14 @@ const callDb = (db: object, method: string): unknown => {
   return Reflect.apply(fn, db, [])
 }
 
-const isMessage = (signal: unknown): boolean =>
-  typeof signal === 'object' &&
-  signal !== null &&
-  typeof Reflect.get(signal, 'from') === 'string' &&
-  typeof Reflect.get(signal, 'to') === 'string' &&
-  Reflect.get(signal, 'type') !== NOTE
+// A signal's sender and receiver, when it is a message rather than a note.
+const messageOf = (signal: unknown): SequenceMessage[] => {
+  if (typeof signal !== 'object' || signal === null || Reflect.get(signal, 'type') === NOTE) {
+    return []
+  }
+
+  const from: unknown = Reflect.get(signal, 'from')
+  const to: unknown = Reflect.get(signal, 'to')
+
+  return typeof from === 'string' && typeof to === 'string' ? [{ from, to }] : []
+}

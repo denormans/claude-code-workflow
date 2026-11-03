@@ -14,15 +14,30 @@ else
   STOP_ACTIVE="false"
 fi
 
-# Loop guard: if we're already resuming from a Stop hook, let the session stop.
-[[ "$STOP_ACTIVE" == "true" ]] && exit 0
+# Records the background work this turn ended on, so the board shows the session waiting rather than
+# working (FLOW-457). Only on an allowed stop: a blocked stop continues the turn. A turn-start clear
+# only clears a wait recorded before that turn started, so it never erases this record; failures are
+# swallowed so a stop never fails.
+record_wait() {
+  printf '%s' "$INPUT" | "${PLUGIN_ROOT}/bin/dashboard" session wait --session "$SESSION_ID" >/dev/null 2>&1 || true
+}
+
 [[ -z "$SESSION_ID" ]] && exit 0
+
+# Loop guard: if we're already resuming from a Stop hook, let the session stop.
+if [[ "$STOP_ACTIVE" == "true" ]]; then
+  record_wait
+  exit 0
+fi
 
 if ! GATE=$("${PLUGIN_ROOT}/bin/mailbox" stop-gate --session "$SESSION_ID" 2>/dev/null); then
   GATE='allow'
 fi
 DECISION=${GATE%%$'\n'*}
-[[ "$DECISION" != "block" ]] && exit 0
+if [[ "$DECISION" != "block" ]]; then
+  record_wait
+  exit 0
+fi
 REASON=${GATE#*$'\n'}
 
 jq -n --arg r "$REASON" '{decision:"block", reason:$r}'

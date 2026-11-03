@@ -1,9 +1,15 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { JSDOM, type DOMWindow } from 'jsdom'
 import { CAPTIONED_DIAGRAM_AREA, DIAGRAM_AREA, composeHtml, timeScenes } from './compose.ts'
+import { PALETTES } from '../render-diagrams/render.ts'
+import { HYPERFRAMES } from './main.ts'
 import { prepareScript, type PreparedScene } from './prepare.ts'
 import type { Alignment } from './narration.ts'
 
@@ -24,6 +30,21 @@ const SEQUENCE = [
   '  end',
   '  rd->>rd: compose',
   '  rd-)-u: mp4',
+].join('\n')
+
+// A sequence whose message labels run to about 100 characters, as an architecture walkthrough's do.
+const LONG_LABEL_SEQUENCE = [
+  'sequenceDiagram',
+  '  participant App',
+  '  participant Gen as Generated API',
+  '  participant Eng as Filter engine',
+  '  participant DB as Postgres (RLS)',
+  '  App ->> Gen: progresses(where: {nextReviewAt: {lte: now}}, orderBy: NEXT_REVIEW_AT) { totalCount items }',
+  '  Gen ->> Eng: translate field names to field ids, validate',
+  '  Eng ->> DB: SELECT … WHERE entity AND current AND conditions ORDER BY … LIMIT/OFFSET (tenant context)',
+  '  DB -->> Eng: readable matching rows only',
+  '  Gen ->> DB: SELECT count(*) … same conditions (tenant context, only because totalCount was selected)',
+  '  Gen -->> App: page + totalCount',
 ].join('\n')
 
 // One character per tenth of a second.
@@ -255,7 +276,7 @@ test('composeHtml: a shown shape glows, a shown edge is recoloured with no glow'
   const line = tweens.filter((t) => t.at === at && 'stroke' in t.vars)
   assert.deepEqual(
     shape.map((t) => t.target),
-    ['#scene-0 g[class~="YQ=="]']
+    ['#scene-0 g[class~="YQ=="], #scene-0 g[class~="Yg=="]']
   )
   assert.deepEqual(
     line.map((t) => [t.target, t.vars.stroke]),
@@ -615,6 +636,42 @@ test('composeHtml: a sequence fills the diagram area rather than keeping its nat
   }
 })
 
+test(
+  'composeHtml: long sequence labels wrap and render large in the browser that renders the video',
+  { timeout: 300_000 },
+  async () => {
+    const scenes = await prepareScript({
+      title: 'T',
+      palette: 'classic',
+      scenes: [
+        {
+          heading: 'S',
+          narration: 'The app asks for a page.',
+          visual: { kind: 'sequence', mermaid: LONG_LABEL_SEQUENCE },
+          steps: [],
+        },
+      ],
+    })
+
+    const page = renderInBrowser(
+      composeHtml(
+        'T',
+        'classic',
+        timeScenes(
+          scenes,
+          scenes.map(({ narration }) => ({ audio: undefined, alignment: alignmentOf(narration) }))
+        )
+      )
+    )
+
+    assert.ok(page.labelHeight >= 22, `label lines are ${page.labelHeight}px tall`)
+    assert.equal(page.untaggedLabels, 0, 'every label line is tagged with its message')
+    assert.equal(page.labelStroke, cssRgb(PALETTES.classic.canvas), 'the halo is the canvas colour')
+    assert.equal(page.labelPaintOrder, 'stroke', 'the halo is painted under the text')
+    assert.equal(page.bottomActors, 0, 'the participant row is drawn once, at the top')
+  }
+)
+
 test('composeHtml: a voiced walkthrough has no captions and the full diagram area', () => {
   const timed = timeScenes(
     [title, bullets],
@@ -734,3 +791,184 @@ const loadSequencePage = async (html: string): Promise<DOMWindow> => {
   }
   return window
 }
+
+test('composeHtml: when a step lights only a line, the boxes at both its ends glow with it', async () => {
+  const scenes = await prepareScript({
+    title: 'T',
+    palette: 'classic',
+    scenes: [
+      {
+        heading: 'D',
+        narration: 'Intro. Boxes. The edge.',
+        visual: { kind: 'diagram', d2: '*: {class: tool}\na -> b' },
+        steps: [
+          { cue: 'Boxes', show: ['a', 'b'], focus: [] },
+          { cue: 'The edge', show: ['(a -> b)[0]'], focus: [] },
+        ],
+      },
+      {
+        heading: 'S',
+        narration: 'Intro. Actors. The message.',
+        visual: { kind: 'sequence', mermaid: 'sequenceDiagram\n  A->>B: hi' },
+        steps: [
+          { cue: 'Actors', show: ['A', 'B'], focus: [] },
+          { cue: 'The message', show: ['0'], focus: [] },
+        ],
+      },
+    ],
+  })
+  const timed = timeScenes(
+    scenes,
+    scenes.map(({ narration }) => ({ audio: 'a.mp3', alignment: alignmentOf(narration) }))
+  )
+  const tweens: { at: number; target: string; vars: Record<string, unknown> }[] = JSON.parse(
+    /const tweens = (.*)\n/.exec(composeHtml('T', 'classic', timed))?.[1] ?? '[]'
+  )
+  const glowsAt = (scene: number) => {
+    const at = (timed[scene]?.start ?? 0) + (timed[scene]?.cues[1] ?? 0)
+    return tweens
+      .filter((t) => t.at === at && t.vars.filter !== undefined)
+      .map((t) => [t.target, t.vars.filter !== 'none'])
+  }
+  const boxes = '#scene-0 g[class~="YQ=="], #scene-0 g[class~="Yg=="]'
+  const actors = '#scene-1 [data-participant="A"], #scene-1 [data-participant="B"]'
+  // Step 0's glow ends at the instant step 1's begins; the timeline sets them in this order, so
+  // the boxes end lit.
+  assert.deepEqual(glowsAt(0), [
+    [boxes, false],
+    [boxes, true],
+  ])
+  assert.deepEqual(glowsAt(1), [
+    [actors, false],
+    [actors, true],
+  ])
+})
+
+// What a rendered sequence's message labels look like once Mermaid has drawn them.
+interface RenderedLabels {
+  // The mean rendered height of a label line, in CSS pixels.
+  labelHeight: number
+  // Label lines with no data-message, which no step can highlight.
+  untaggedLabels: number
+  // The first label line's computed stroke and paint order.
+  labelStroke: string
+  labelPaintOrder: string
+  // Participant boxes drawn along the bottom of the diagram.
+  bottomActors: number
+}
+
+// Renders a composed page in the Chrome HyperFrames renders walkthroughs with, and reads its
+// sequence labels back through the page title once the page's timeline exists.
+const renderInBrowser = (html: string): RenderedLabels => {
+  const dir = mkdtempSync(join(tmpdir(), 'walkthrough-test-'))
+  try {
+    const require = createRequire(import.meta.url)
+    copyFileSync(require.resolve('gsap/dist/gsap.min.js'), join(dir, 'gsap.min.js'))
+    copyFileSync(require.resolve('mermaid/dist/mermaid.min.js'), join(dir, 'mermaid.min.js'))
+
+    writeFileSync(
+      join(dir, 'index.html'),
+      html.replace('</body>', `<script>${measureLabels}</script></body>`)
+    )
+    const run = spawnSync(
+      renderChrome(),
+      [
+        '--headless',
+        '--no-sandbox',
+        '--disable-gpu',
+        '--allow-file-access-from-files',
+        '--window-size=1920,1080',
+        '--virtual-time-budget=10000',
+        '--dump-dom',
+        pathToFileURL(join(dir, 'index.html')).href,
+      ],
+      { encoding: 'utf-8', maxBuffer: 64 * 1024 * 1024, timeout: CHROME_RENDER_TIMEOUT_MS }
+    )
+
+    assertExited(run, 'headless Chrome render', CHROME_RENDER_TIMEOUT_MS)
+    const title = /<title>([^<]*)<\/title>/.exec(run.stdout)?.[1] ?? ''
+    return JSON.parse(title) as RenderedLabels
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+// A #RRGGBB colour in the rgb(r, g, b) form getComputedStyle returns.
+const cssRgb = (hex: string): string => {
+  const [r, g, b] = [1, 3, 5].map((at) => parseInt(hex.slice(at, at + 2), 16))
+  return `rgb(${r}, ${g}, ${b})`
+}
+
+// The executable of the Chrome HyperFrames renders with, downloading it on first use.
+const renderChrome = (): string => {
+  const browser = (command: string, timeout: number) =>
+    spawnSync('npx', ['-y', HYPERFRAMES, 'browser', command], {
+      encoding: 'utf-8',
+      env: { ...process.env, HYPERFRAMES_NO_TELEMETRY: '1', DO_NOT_TRACK: '1' },
+      timeout,
+    })
+
+  const ensure = browser('ensure', BROWSER_ENSURE_TIMEOUT_MS)
+  assertExited(ensure, 'hyperframes browser ensure', BROWSER_ENSURE_TIMEOUT_MS)
+
+  const path = browser('path', BROWSER_PATH_TIMEOUT_MS)
+  assertExited(path, 'hyperframes browser path', BROWSER_PATH_TIMEOUT_MS)
+
+  return path.stdout.trim().split('\n').at(-1) ?? ''
+}
+
+// Each of the test's synchronous child processes is bounded on its own, since spawnSync blocks the
+// event loop and the test's own timeout cannot fire while one is stuck. The three bounds sum to
+// less than that test's 300_000ms.
+const BROWSER_ENSURE_TIMEOUT_MS = 150_000
+const BROWSER_PATH_TIMEOUT_MS = 30_000
+const CHROME_RENDER_TIMEOUT_MS = 60_000
+
+// Fails naming the process and, with its stderr, why it did not exit 0. Any spawnSync error fails
+// whatever the exit status, since a process that handles the SIGTERM sent at its timeout can still
+// exit with a status: ETIMEDOUT is reported as a timeout, any other error (a spawn error, an output
+// overflow) by spawnSync's own error message. Without an error, a signal kill and a non-zero exit
+// are reported as such.
+const assertExited = (
+  run: ReturnType<typeof spawnSync>,
+  processName: string,
+  timeoutMs: number
+): void => {
+  const stderr = String(run.stderr ?? '')
+
+  if (run.error !== undefined) {
+    const timedOut = 'code' in run.error && run.error.code === 'ETIMEDOUT'
+    const cause = timedOut
+      ? `did not exit within ${timeoutMs}ms`
+      : `hit a spawnSync error: ${run.error.message}`
+    assert.fail(`${processName} ${cause} (status ${run.status}, signal ${run.signal}): ${stderr}`)
+  }
+
+  if (run.status === null) {
+    assert.fail(`${processName} was ended by signal ${run.signal}: ${stderr}`)
+  }
+
+  assert.equal(run.status, 0, `${processName} failed: ${stderr}`)
+}
+
+// Waits for the page script to finish Mermaid's render, then writes the labels' measurements to
+// the page title, which --dump-dom prints.
+const measureLabels = `
+const measure = () => {
+  if (window.__timelines === undefined) {
+    setTimeout(measure, 50)
+    return
+  }
+
+  const labels = [...document.querySelectorAll('.mermaid > svg .messageText')]
+  const style = getComputedStyle(labels[0])
+  document.title = JSON.stringify({
+    labelHeight: labels.reduce((sum, label) => sum + label.getBoundingClientRect().height, 0) / labels.length,
+    untaggedLabels: labels.filter((label) => !label.hasAttribute('data-message')).length,
+    labelStroke: style.stroke,
+    labelPaintOrder: style.paintOrder,
+    bottomActors: document.querySelectorAll('.mermaid > svg .actor-bottom').length,
+  })
+}
+measure()
+`

@@ -26,6 +26,8 @@ export interface RenderedDiagram {
   webp: Buffer
   // Each shape's and connection's box, keyed by its D2 id, in the SVG's own coordinates.
   elements: Map<string, Rect>
+  // The two shapes each connection joins, keyed by the connection's D2 id.
+  endpoints: Map<string, string[]>
 }
 
 // The smallest text a diagram draws: its edge labels.
@@ -95,7 +97,12 @@ export const createDiagramRenderer = (paletteName: PaletteName): DiagramRenderer
       .resize({ width: RASTER_MAX_WIDTH, withoutEnlargement: true })
       .webp({ quality: 90 })
       .toBuffer()
-    return { svg, webp, elements: elementBounds(final.diagram) }
+    return {
+      svg,
+      webp,
+      elements: elementBounds(final.diagram),
+      endpoints: connectionEndpoints(final.diagram),
+    }
   }
 
   // @terrastruct/d2 0.1.33 has no close(); its worker thread keeps the process alive until it is
@@ -519,6 +526,9 @@ const elementBounds = ({ shapes, connections }: Diagram): Map<string, Rect> => {
   }
   return bounds
 }
+
+const connectionEndpoints = ({ connections }: Diagram): Map<string, string[]> =>
+  new Map(connections.map(({ id, src, dst }) => [id, [src, dst]]))
 
 // D2 types a route point as any.
 const isPoint = (value: unknown): value is { x: number; y: number } =>

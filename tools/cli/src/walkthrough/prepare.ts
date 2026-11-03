@@ -3,7 +3,12 @@ import {
   createDiagramRenderer,
   type RenderedDiagram,
 } from '../render-diagrams/render.ts'
-import { readSequence, validateMermaid, type SequenceIds } from '../validate-mermaid/validate.ts'
+import {
+  isMessageIndex,
+  readSequence,
+  validateMermaid,
+  type SequenceIds,
+} from '../validate-mermaid/validate.ts'
 import { ScriptError, type Scene, type Step, type WalkthroughScript } from './script.ts'
 
 export interface PreparedScene extends Scene {
@@ -12,11 +17,13 @@ export interface PreparedScene extends Scene {
 }
 
 // Checks everything about a script that can be checked without spending ElevenLabs characters, and
-// compiles its diagrams. Throws a ScriptError listing every problem it found.
+// compiles its diagrams. Each step also shows the boxes at both ends of every line it shows, so a
+// line never lights up without them. Throws a ScriptError listing every problem it found.
 export const prepareScript = async (script: WalkthroughScript): Promise<PreparedScene[]> => {
   const problems: string[] = []
   const scenes: PreparedScene[] = []
   const renderer = createDiagramRenderer(script.palette)
+
   try {
     for (const [i, scene] of script.scenes.entries()) {
       const at = `scenes[${i}]`
@@ -26,8 +33,10 @@ export const prepareScript = async (script: WalkthroughScript): Promise<Prepared
   } finally {
     await renderer.close()
   }
+
   // Only once D2 is closed: Mermaid's check puts a `window` on globalThis while it runs, and a D2
   // worker starting up while one is there never becomes ready (validateMermaid).
+  const sequences = new Map<number, SequenceIds>()
   for (const [i, { visual, steps }] of script.scenes.entries()) {
     if (visual.kind === 'sequence') {
       const result = await validateMermaid(visual.mermaid)
@@ -35,13 +44,40 @@ export const prepareScript = async (script: WalkthroughScript): Promise<Prepared
         problems.push(`scenes[${i}].visual.mermaid: ${result.error ?? 'invalid'}`)
         continue
       }
-      checkSequenceSteps(steps, await readSequence(visual.mermaid), `scenes[${i}]`, problems)
+      const sequence = await readSequence(visual.mermaid)
+      checkSequenceSteps(steps, sequence, `scenes[${i}]`, problems)
+      sequences.set(i, sequence)
     }
   }
+
   if (problems.length > 0) {
     throw new ScriptError(problems)
   }
-  return scenes
+
+  return scenes.map((scene, i) => withLineEnds(scene, sequences.get(i)))
+}
+
+// Adds to each step the boxes at both ends of every edge or message it shows, after the ids the
+// author listed and without repeats. Runs after every check, so problems name only what the author
+// wrote.
+const withLineEnds = (scene: PreparedScene, sequence: SequenceIds | undefined): PreparedScene => {
+  const ends = (id: string): string[] => {
+    if (scene.visual.kind !== 'sequence') {
+      return scene.diagram?.endpoints.get(id) ?? []
+    }
+
+    const message = isMessageIndex(id) ? sequence?.messages[Number(id)] : undefined
+
+    return message === undefined ? [] : [message.from, message.to]
+  }
+
+  return {
+    ...scene,
+    steps: scene.steps.map((step) => ({
+      ...step,
+      show: [...new Set([...step.show, ...step.show.flatMap(ends)])],
+    })),
+  }
 }
 
 // Each cue must be spoken, and in step order: a cue is looked for after the previous one ends.
@@ -74,11 +110,11 @@ const checkSequenceSteps = (
         problems.push(
           `${where}: "${id}" is both a participant id and a message index; give the participant a non-numeric id`
         )
-      } else if (/^\d+$/.test(id) && !/^(0|[1-9]\d*)$/.test(id)) {
+      } else if (/^\d+$/.test(id) && !isMessageIndex(id)) {
         problems.push(`${where}: "${id}" is not a canonical message index (no leading zeros)`)
-      } else if (!(/^\d+$/.test(id) ? Number(id) < messages : participants.includes(id))) {
+      } else if (!(/^\d+$/.test(id) ? Number(id) < messages.length : participants.includes(id))) {
         problems.push(
-          `${where}: "${id}" is neither a participant nor a message index (participants: ${participants.join(', ')}; ${messages === 0 ? 'no messages' : `messages: 0 to ${messages - 1}`})`
+          `${where}: "${id}" is neither a participant nor a message index (participants: ${participants.join(', ')}; ${messages.length === 0 ? 'no messages' : `messages: 0 to ${messages.length - 1}`})`
         )
       }
     }

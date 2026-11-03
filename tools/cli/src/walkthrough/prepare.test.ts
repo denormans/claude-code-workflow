@@ -210,3 +210,56 @@ test('prepareScript: a sequence with no messages says so when a step shows an un
     ]
   )
 })
+
+test('prepareScript: a step that shows an edge also shows the shapes it joins, by their full ids', async () => {
+  const [scene] = await prepareScript({
+    title: 'T',
+    palette: 'classic',
+    scenes: [
+      {
+        heading: 'D',
+        narration: 'Intro. Edges.',
+        visual: {
+          kind: 'diagram',
+          d2: 'x: {a: {class: tool}; b: {class: tool}}\nc: {class: store}\nx.a -> x.b\nx.a -> c\nc -> c',
+        },
+        steps: [
+          { cue: 'Edges', show: ['c', 'x.(a -> b)[0]', '(x.a -> c)[0]', '(c -> c)[0]'], focus: [] },
+        ],
+      },
+    ],
+  })
+  assert.deepEqual(scene?.steps[0]?.show, [
+    'c',
+    'x.(a -> b)[0]',
+    '(x.a -> c)[0]',
+    '(c -> c)[0]',
+    'x.a',
+    'x.b',
+  ])
+})
+
+test('prepareScript: a step that shows a message also shows its sender and receiver', async () => {
+  const [scene] = await prepareScript({
+    title: 'T',
+    palette: 'classic',
+    scenes: [
+      {
+        heading: 'S',
+        narration: 'Intro. Calls. Self.',
+        visual: { kind: 'sequence', mermaid: SEQUENCE },
+        steps: [
+          { cue: 'Calls', show: ['1', '2'], focus: [] },
+          { cue: 'Self', show: ['3'], focus: [] },
+        ],
+      },
+    ],
+  })
+  assert.deepEqual(
+    scene?.steps.map(({ show }) => show),
+    [
+      ['1', '2', 'rd', 'el'],
+      ['3', 'rd'],
+    ]
+  )
+})

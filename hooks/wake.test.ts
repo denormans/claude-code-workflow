@@ -370,12 +370,12 @@ const stubRuns = (on: Parameters<typeof mock.clock>[0]) => {
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('session.id', () => answer('sess-1'))
   on('process.run', ($, e) => {
-    if (e.argv[1] === 'session') {
+    if (e.argv[2] === 'heartbeat') {
       beats.push([...e.argv])
       if (state.isBeatRejected) {
         throw new Error('timed out')
       }
-    } else {
+    } else if (e.argv[1] === 'check') {
       checks.push([...e.argv])
     }
 
@@ -475,4 +475,61 @@ test('a session with nobody at the prompt never beats', async ($, on) => {
   })
   await clock.advance(BEAT_MS)
   expect(beats.length).toBe(0)
+})
+
+test('a main-loop turn start clears the background wait; a subagent turn start does not', async ($, on) => {
+  mock.clock(on)
+  mock.store(on)
+  const argvs: string[][] = []
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  on('session.id', () => answer('sess-1'))
+  on('process.run', ($, e) => {
+    argvs.push([...e.argv])
+    return answer({ exitCode: 0, stdout: '', stderr: '' })
+  })
+  on('turn.start', ($, e) => ({ turnId: e.turnId }))
+  await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+
+  const beforeMs = Date.now()
+  await $.turn.start({ text: 'hi', turnId: 't1' })
+  const afterMs = Date.now()
+  await Promise.resolve()
+  await Promise.resolve()
+  expect(argvs.length).toBe(1)
+  const [, verb, sub, clear, flag, instant, sessionFlag, sessionId] = argvs[0]!
+  expect([verb, sub, clear, flag, sessionFlag, sessionId]).toEqual([
+    'session',
+    'wait',
+    '--clear',
+    '--recorded-before',
+    '--session',
+    'sess-1',
+  ])
+  expect(new Date(instant!).toISOString()).toBe(instant)
+  expect(Date.parse(instant!)).toBeGreaterThanOrEqual(beforeMs)
+  expect(Date.parse(instant!)).toBeLessThanOrEqual(afterMs)
+
+  await $.turn.start({ text: 'sub', turnId: 't2', agentId: 'agent-1' })
+  await Promise.resolve()
+  await Promise.resolve()
+  expect(argvs.length).toBe(1)
+})
+
+test('a rejected turn-start clear neither fails the turn nor goes unhandled', async ($, on) => {
+  mock.clock(on)
+  mock.store(on)
+  let clears = 0
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  on('session.id', () => answer('sess-1'))
+  on('process.run', () => {
+    clears += 1
+    throw new Error('timed out')
+  })
+  on('turn.start', ($, e) => ({ turnId: e.turnId }))
+  await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+
+  await $.turn.start({ text: 'hi', turnId: 't1' })
+  await new Promise((resolve) => setTimeout(resolve, 10))
+
+  expect(clears).toBe(1)
 })

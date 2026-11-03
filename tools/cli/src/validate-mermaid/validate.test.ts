@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { validateMermaid } from './validate.ts'
+import { readSequence, validateMermaid } from './validate.ts'
 
 test('validateMermaid: accepts a valid flowchart', async () => {
   const result = await validateMermaid('graph TD\n  A[Start] --> B[End]')
@@ -19,4 +19,18 @@ test('validateMermaid: leaves no window or document on globalThis', async () => 
   await validateMermaid('graph TD\n  A --> B')
   assert.equal('window' in globalThis, false)
   assert.equal('document' in globalThis, false)
+})
+
+test('readSequence: gives each message its sender and receiver, in source order, skipping notes', async () => {
+  const ids = await readSequence(
+    'sequenceDiagram\n  actor u as User\n  u->>+rd: render\n  Note over rd: hi\n  rd->>rd: self\n  rd-)-u: mp4'
+  )
+  assert.deepEqual(ids, {
+    participants: ['u', 'rd'],
+    messages: [
+      { from: 'u', to: 'rd' },
+      { from: 'rd', to: 'rd' },
+      { from: 'rd', to: 'u' },
+    ],
+  })
 })

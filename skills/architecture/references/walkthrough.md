@@ -110,9 +110,13 @@ what a thing is for, not what it is called in the code. Don't mention the voice 
 
 What lights up when is the part a viewer notices. Steps follow these rules:
 
-- **Light only what the cue sentence names.** A step's `show` holds what its sentence talks about,
-  usually one box and its edges. Never light most of a diagram in one step; a viewer can't follow
-  that.
+- **Light what the cue sentence names, and the ends of every line it lights.** A step's `show`
+  holds what its sentence talks about: usually one box, or one line with the two boxes it joins.
+  Never light most of a diagram in one step; a viewer can't follow that.
+- **Light a line with both of its ends.** A step that lights an edge also lists, in the same
+  `show`, the two shapes the edge joins, or its one shape for an edge from a shape to itself. A
+  step that lights a message also lists its sender and receiver, or its one participant for a
+  message to itself.
 - **Give each step time.** Put cues at least a sentence apart, so every step stays on screen for a
   few seconds before the next.
 - **Diagrams open whole and undimmed.** A diagram or sequence scene first shows the whole diagram
@@ -137,7 +141,8 @@ In a sequence scene, `show` takes:
   arrow. Notes, blocks such as `loop` and `alt`, and activations are not messages and are not
   counted.
 
-A participant glows, box and lifeline. A message's arrow and label turn yellow.
+A participant glows, box and lifeline. A message's arrow and label turn yellow, and its sender and
+receiver glow with it.
 
 ### Diagrams
 
@@ -182,7 +187,7 @@ Pull a few frames as PNGs, one per diagram or sequence scene, at the scene's bus
 silent video, also one per title and bullets scene:
 `ffmpeg -loglevel error -ss "<seconds>" -i "<mp4>" -frames:v 1 "<scratchpad>/<name>.png"`. Have an
 `artifact-viewer` check each frame:
-- the lit elements match what the cue names;
+- the lit elements are what the cue names, plus both ends of every lit edge or message;
 - the diagram reads in one direction;
 - nothing is clipped;
 - in a silent video, the subtitle reads cleanly and sits below the diagram, not over it.

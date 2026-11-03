@@ -7,6 +7,7 @@ import {
   type Rect,
 } from '../render-diagrams/render.ts'
 import { bringIntoView, frame, union, type Size } from './camera.ts'
+import { isMessageIndex } from '../validate-mermaid/validate.ts'
 import type { PreparedScene } from './prepare.ts'
 import { captionsOf, type Caption } from './silent.ts'
 import type { Alignment } from './narration.ts'
@@ -53,6 +54,11 @@ const CAMERA_MOVE = 0.8
 const HIGHLIGHT = '#FFD166'
 // Two tight shadows rather than one wide one: a single blur fades out against the dark canvas.
 const GLOW = `drop-shadow(0 0 4px ${HIGHLIGHT}) drop-shadow(0 0 8px ${HIGHLIGHT})`
+// Mermaid widens the gap between two adjacent participants to fit the longest label between them,
+// so long labels make the diagram far wider than the frame and it is scaled down to fit. With wrap
+// on, each label is measured after wrapping it to about the width setting, which keeps the gaps
+// near that width. mirrorActors: false draws the participant row once, at the top.
+const SEQUENCE_LAYOUT = { wrap: true, width: 250, mirrorActors: false }
 
 // Places scenes back to back, each as long as its narration plus a short tail, and turns each cue
 // into the time it is spoken.
@@ -337,8 +343,6 @@ const sequencePart = (id: string): string =>
     ? `[data-message=${JSON.stringify(id)}]`
     : `[data-participant=${JSON.stringify(id)}]`
 
-const isMessageIndex = (id: string): boolean => /^(0|[1-9]\d*)$/.test(id)
-
 // Each caption fades in at its first character and fades out as the next caption starts, so
 // adjacent captions never overlap.
 const captionTweens = ({ start, captions }: TimedScene, root: string): Tween[] =>
@@ -459,7 +463,7 @@ const tagSequence = (svg) => {
 }
 ;(async () => {
   if (window.mermaid) {
-    mermaid.initialize({ startOnLoad: false, theme: 'base', themeVariables: ${JSON.stringify(theme)} })
+    mermaid.initialize({ startOnLoad: false, theme: 'base', themeVariables: ${JSON.stringify(theme)}, sequence: ${JSON.stringify(SEQUENCE_LAYOUT)} })
     await mermaid.run()
     // Mermaid caps its SVG at the diagram's natural width with an inline max-width. Without it
     // the SVG fills the diagram area and its viewBox scales the drawing to fit.
@@ -481,6 +485,9 @@ const tagSequence = (svg) => {
 `
 }
 
+// A message label carries a halo in the canvas colour, so a lifeline passing behind a wrapped
+// label does not cut through its words. Mermaid's own rule sets stroke: none on labels under the
+// diagram's id, which outranks this one without !important.
 const stylesheet = (palette: PaletteName, area: Size, captioned: boolean): string => `
 html, body { margin: 0; background: ${PALETTES[palette].canvas}; }
 #root { position: relative; width: ${STAGE.width}px; height: ${STAGE.height}px; overflow: hidden;
@@ -498,6 +505,8 @@ li { margin-bottom: 28px; }
 .diagram > svg { width: 100%; height: 100%; }
 .mermaid { display: flex; align-items: center; justify-content: center; }
 .mermaid > svg { width: 100%; height: 100%; }
+.mermaid > svg .messageText { paint-order: stroke; stroke: ${PALETTES[palette].canvas} !important;
+  stroke-width: 8px; stroke-linejoin: round; }
 ${captioned ? captionStyle : ''}`
 
 // The caption band starts at 1080 - 40 - 2 x 40 x 1.3 = 936px. Bullets are set so that six bullets

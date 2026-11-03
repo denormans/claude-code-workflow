@@ -19,6 +19,8 @@ const BEAT_INTERVAL_MS = 300_000
 // `dashboard session heartbeat` invokes the board once per live leaf, 5s each, plus one
 // `session list` read for each leaf marked paused.
 const BEAT_TIMEOUT_MS = 30_000
+// `dashboard session wait --clear` invokes the board once per own leaf, 5s each.
+const CLEAR_TIMEOUT_MS = 30_000
 // `mailbox check` exits 0 on a complete read and 3 on a partial one: there is no board binary, a board
 // read failed or its output was unparseable, or the registry was unreadable, so the answers listed
 // may be a subset of what is released.
@@ -37,9 +39,39 @@ export const register: Register = (on) => {
   let hasActivitySinceBeat = false
   let lastBeatAt = Number.NEGATIVE_INFINITY
 
+  // A main-loop turn starting means the session is no longer waiting on background work (FLOW-457):
+  // clear what its last Stop recorded. The clear carries the instant the turn started, so it only
+  // clears a wait recorded before then, never one this turn's own Stop wrote. Not awaited, so a slow
+  // board never delays the turn, and a failure is dropped — the next turn start clears again.
   on('turn.start', ($, e, next) => {
     isTurnRunning = true
     turnStarts += 1
+
+    if (e.agentId === undefined) {
+      const turnStartedAt = new Date().toISOString()
+
+      void $.session
+        .id()
+        .then((sessionId) =>
+          $.process.run(
+            [
+              `${$.plugin.root}/bin/dashboard`,
+              'session',
+              'wait',
+              '--clear',
+              '--recorded-before',
+              turnStartedAt,
+              '--session',
+              sessionId,
+            ],
+            {
+              timeoutMs: CLEAR_TIMEOUT_MS,
+            }
+          )
+        )
+        .catch(() => undefined)
+    }
+
     return next(e)
   })
 
