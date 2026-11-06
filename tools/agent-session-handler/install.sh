@@ -10,7 +10,7 @@ LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchSe
 mkdir -p "$(dirname "$APP")"
 rm -rf "$APP"
 osacompile -o "$APP" "$SCRIPT_DIR/handler.applescript"
-cp "$SCRIPT_DIR/find-live-session.py" "$SCRIPT_DIR/validate-link.py" "$SCRIPT_DIR/check-resume-dir.py" "$APP/Contents/Resources/"
+cp "$SCRIPT_DIR/find-live-session.py" "$SCRIPT_DIR/validate-link.py" "$SCRIPT_DIR/check-resume-dir.py" "$SCRIPT_DIR/launch-link.py" "$APP/Contents/Resources/"
 /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string com.denormans.agent-session" "$PLIST" 2>/dev/null \
   || /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier com.denormans.agent-session" "$PLIST"
 /usr/libexec/PlistBuddy -c "Add :CFBundleURLTypes array" "$PLIST"

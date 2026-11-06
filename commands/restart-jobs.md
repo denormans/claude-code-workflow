@@ -29,7 +29,7 @@ You're most likely running this because the session just restarted. With that in
      and its item is still open, the link in the item is dead: re-run the `playtest start` the PR
      Lifecycle skill prescribes (§Playtest Link), withdraw the item, and post a fresh one with the
      new link and `--replaces "<id>"`.
-   - **Anything else** you had launched in the background — other watchers, pollers, or `/loop`-style jobs. Relaunch a watcher with `timeout: 2147483647` (`skills/workflow-guide/references/background-watchers.md`).
+   - **Anything else** you had launched in the background — other watchers, pollers, or `/loop`-style jobs. Relaunch a watcher with `timeout: 2147483647`, and give every job you relaunch a `description` naming what it waits on (`skills/workflow-guide/references/background-watchers.md`).
 
    If you suspect a watcher is already live, check for the process before relaunching — do not start a second one to be safe.
 

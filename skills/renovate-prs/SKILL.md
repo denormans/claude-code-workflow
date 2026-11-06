@@ -18,7 +18,7 @@ restart the monitor.
 covers:
 
 - Configuration (`RENOVATE_MONITOR_SCOPE` and optional overrides)
-- Starting the monitor (`Bash(... run_in_background=true, timeout=2147483647)`)
+- Starting the monitor (`Bash(... run_in_background=true, timeout=2147483647, description=...)`)
 - Single-tick debug mode (`--once`, `--dry-run`, `--verbose`)
 - Configuration including `RENOVATE_MONITOR_EXCLUDE` (repos to skip), `RENOVATE_MONITOR_MERGE_DELAY_SECONDS` (inter-merge spacing), `RENOVATE_MONITOR_HOLD_FOR_HUMAN_PRS` (opt-in, off by default — hold merges while a human PR is open in the repo; bots incl. `*[bot]` like release-please are auto-excluded), `RENOVATE_MONITOR_HOLD_RELAX_HOURS`/`_TZ` (quiet window that suspends that hold, e.g. `0-8` `America/Chicago`), and `RENOVATE_MONITOR_BOT_AUTHORS` (rare fallback list for bots run under a plain user account)
 - The board: one node per monitor session, a board question at every stop, a node retitle for outcomes that decide nothing, and an info note for the `all-done` summary (invoke `workflow:board` for the protocol)
@@ -45,5 +45,5 @@ covers:
 2. If a monitor event just fired, parse the JSON on stdout and jump to the matching event section.
 3. If the user just asked to start the monitor, confirm `RENOVATE_MONITOR_SCOPE` is set, enter the
    board node (runbook, "The board"), then launch `renovate-pr-monitor` via `Bash` with
-   `run_in_background=true` and `timeout=2147483647` (`skills/workflow-guide/references/background-watchers.md`), and idle until it exits.
+   `run_in_background=true`, `timeout=2147483647` and the runbook's `description` (`skills/workflow-guide/references/background-watchers.md`), and idle until it exits.
 4. Follow the runbook's remediation steps. Restart the monitor after any remediation.

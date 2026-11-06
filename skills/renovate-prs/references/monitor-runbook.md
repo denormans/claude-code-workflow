@@ -269,7 +269,8 @@ In any Claude session, start the monitor in the background:
 Bash(
   command="renovate-pr-monitor",
   run_in_background=true,
-  timeout=2147483647
+  timeout=2147483647,
+  description="Renovate monitor (<RENOVATE_MONITOR_SCOPE>): drain dependency PRs (exit → handle its JSON event per the runbook)"
 )
 ```
 
@@ -570,7 +571,7 @@ history.
    ```
 
    A note is not a wait. Don't record its id and don't wait for it. Go straight to the restart.
-3. **Restart the monitor** in the background with `timeout=2147483647`. The new session starts with empty
+3. **Restart the monitor** in the background with `timeout=2147483647` and the `description` from "Starting the monitor". The new session starts with empty
    accumulators.
 
 No code changes, no worktree, no state-file edits.
@@ -802,7 +803,8 @@ keeps draining:
 Bash(
   command="renovate-pr-monitor",
   run_in_background=true,
-  timeout=2147483647
+  timeout=2147483647,
+  description="Renovate monitor (<RENOVATE_MONITOR_SCOPE>): drain dependency PRs (exit → handle its JSON event per the runbook)"
 )
 ```
 

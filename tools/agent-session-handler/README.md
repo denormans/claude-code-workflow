@@ -2,7 +2,8 @@
 
 A small macOS applet that opens `agent-session://` links from the board. For an `iterm` link it
 focuses the iTerm2 session the link names; if that session is gone, it opens a new iTerm2 tab in the
-session's launch directory and runs `claude --resume` for it.
+session's launch directory and runs `claude --resume` for it. For a `launch` link it starts a new
+interactive Claude Code session in a new iTerm2 tab (see [Starting a new session](#starting-a-new-session)).
 
 ## Install
 
@@ -81,8 +82,103 @@ An attacker therefore needs the user's real session id and a directory whose pat
 project's at every letter and digit, wherever the attacker can create one. A template that runs files
 from `{cwd}`, like the `.env.local` one above, trusts the contents of that directory.
 
+## Starting a new session
+
+A `launch` link starts a new interactive Claude Code session in a new iTerm2 tab:
+
+```
+agent-session://launch?session=<uuid>&exp=<unix seconds>&cwd=<directory>&title=<title>&prompt=<prompt>&sig=<signature>
+```
+
+Every value is URL-encoded: `%20` for a space and `%2B` for `+`, since a bare `+` reads as a space.
+`title` may be empty or left out. The prompt is the session's first message, so a slash command or
+skill in it runs as if typed. In a directory Claude Code has never trusted, Claude Code still asks
+whether to trust it.
+
+### Signed and unsigned links
+
+A link signed with the launch key opens without asking. The board will create and sign launch links
+in a later release; until then, a link you build by hand gets the dialog described below. The
+signature is HMAC-SHA256, keyed by the 32 bytes that the launch key's hex digits encode, over these
+lines joined by a line feed, with no line feed after the last:
+
+```
+agent-session-launch-v1
+<session>
+<exp>
+<cwd>
+<title>
+<prompt>
+```
+
+The signature is written as 64 lowercase hex digits. The handler expects the launch key at
+`~/.config/agent-session/launch-key`: one line of 64 lowercase hex digits. It only reads the file,
+and ignores it unless it is a regular file you own with no group or other permission bits.
+
+A launch link stops at a dialog that shows its directory, title and whole prompt, with Cancel as the
+default, when its signature is missing or does not match, when it has expired (`exp` is not a number
+of up to 12 digits, is in the past, or is more than 150 seconds ahead, which allows for a small clock
+difference), or when no usable key is set up. Nothing runs if you cancel. Such a link may carry at
+most 2,000 characters of prompt, so the dialog can show all of it; a longer one is refused.
+
+Each link names a new session id, and Claude Code refuses to start a session with an id that is
+already in use, so a link opened twice starts one session. The second tab shows Claude Code's
+"already in use" error.
+
+### Launch command
+
+The handler types a launch command into the new tab. The default is:
+
+```
+cd {cwd} && AGENT_SESSION_LAUNCH={session} AGENT_SESSION_TITLE={title} claude --session-id {session} {name} -- {prompt}
+```
+
+To change it, put a one-line template in `~/.config/agent-session/launch-command`. Only the first
+line is read, carriage returns are removed, and a missing or blank file means the default.
+
+| Placeholder | Becomes |
+|---|---|
+| `{cwd}` | the directory, shell-quoted |
+| `{session}` | the new session's id, shell-quoted |
+| `{title}` | the title, shell-quoted (`''` when there is none) |
+| `{name}` | `-n '<title>'`, or nothing when there is no title |
+| `{prompt}` | `"$(cat '<file>' && rm -f '<file>')"`, which reads the prompt from a private file and deletes it |
+
+Everything else is typed as written, including braces that are not one of these placeholders. Keep
+`--` before `{prompt}`, so that a prompt starting with `-` is not read as an option. Keep the two
+`AGENT_SESSION_` variables: they give the session its launch id and title in its environment. The
+command uses POSIX shell syntax (`&&`, `$(…)`, `NAME=value command`), which bash and zsh accept. For
+example, to load `.env.local` and choose a model:
+
+```
+cd {cwd} && { [ ! -f .env.local ] || source .env.local; } && AGENT_SESSION_LAUNCH={session} AGENT_SESSION_TITLE={title} claude --model opus --session-id {session} {name} -- {prompt}
+```
+
+The prompt is not typed into the terminal, because iTerm2 would submit a multi-line prompt one line
+at a time. The handler writes it to a new file, readable only by you, in `agent-session/` under your
+temporary directory (`$TMPDIR`), a folder created so that only you can open it. It refuses to launch
+when that folder is not a directory (a symbolic link included), is not owned by you, or has any group
+or other permission bit. The command reads the file and deletes it; line feeds at the very end of the
+prompt are dropped. A file left by a launch that never ran is deleted by a later launch once it is a
+day old.
+
 ## What a link may contain
 
-The handler refuses, with a dialog and no other action, any link whose decoded values hold a control
-character (below 0x20, or DEL), whose iTerm2 or Claude session id is missing or not a UUID, or whose
-directory is missing or not an existing absolute path.
+The handler refuses, with a dialog and no other action, any `iterm` link whose decoded values hold a
+control character (below 0x20, or DEL), whose iTerm2 or Claude session id is missing or not a UUID, or
+whose directory is missing or not an existing absolute path.
+
+It refuses a `launch` link, signed or not, whose session id is not a UUID; whose directory is not an
+existing absolute path; whose title is longer than 200 characters; or whose prompt is empty, only
+whitespace, or longer than 32 KiB as UTF-8. It also refuses a link in which:
+
+- the session id, directory or title holds a control character (below 0x20, DEL, or 0x80 to 0x9F);
+- the prompt holds a control character other than tab and line feed (a carriage return included);
+- any of the four holds a character Unicode marks as invisible (format characters, line and paragraph
+  separators, and default-ignorable code points such as variation selectors and Hangul fillers). The
+  set is fixed to Unicode 18.0.0, whichever Python runs. The zero-width joiner and the two
+  presentation selectors (U+FE0E and U+FE0F) are allowed in the title and the prompt, so that joined
+  and presentation-styled emoji keep working; flags built from tag characters (England, Scotland,
+  Wales) are still refused.
+
+A NUL in any value counts as a control character, in a `launch` link and in an `iterm` link alike.

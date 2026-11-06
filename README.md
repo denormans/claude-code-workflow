@@ -63,7 +63,7 @@ None of these is required. Each one changes what the workflow does when it is pr
 | A macOS voice (`WALKTHROUGH_MAC_VOICE`) | The walkthrough video is narrated by that voice, when ElevenLabs isn't configured | With `ELEVEN_LABS_API_KEY` unset, Kokoro narrates it if `WALKTHROUGH_KOKORO_VOICE` is set; otherwise the video is silent, with the narration as subtitles |
 | A Kokoro voice (`WALKTHROUGH_KOKORO_VOICE`) | The walkthrough video is narrated by that local voice, when neither ElevenLabs nor a macOS voice is configured | With the other two unset as well, the video is silent, with the narration as subtitles |
 | The board (`ai-workflow-app`) | Questions and approvals go to the board | The workflow asks in the terminal |
-| The Agent Session handler (macOS, iTerm2), installed per [its README](tools/agent-session-handler/README.md#install) | A board session's jump-back link focuses that session's iTerm2 pane, or resumes it in a new tab | The jump-back link opens nothing |
+| The Agent Session handler (macOS, iTerm2), installed per [its README](tools/agent-session-handler/README.md#install) | A board session's jump-back link focuses that session's iTerm2 pane, or resumes it in a new tab; a launch link starts a new Claude Code session in a new tab | The jump-back link opens nothing |
 | CodeRabbit | Its review is part of the pull request loop | Only the agent review runs |
 
 The board is a separate application and is not published. Every variable the plugin reads is listed

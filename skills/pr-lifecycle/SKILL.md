@@ -623,7 +623,7 @@ description: After senior review, create a draft PR, watch the PR, handle review
      pushed, so no bot will re-review and no wake is coming. Post the item only when all hold:
      the PR is out of draft; required CI is green on the current head — if it is not yet green,
      also run `gh pr checks "<pr-number>" --repo "<owner/repo>" --required
-     --watch` via `Bash` with `run_in_background: true` and `timeout: 2147483647`: the monitor emits nothing when CI turns
+     --watch` via `Bash` with `run_in_background: true`, `timeout: 2147483647` and a `description` such as `Wait for required CI on <owner/repo>#<pr-number> (exit → re-check bots-satisfied)` (`skills/workflow-guide/references/background-watchers.md`): the monitor emits nothing when CI turns
      green on a PR that is out of draft (it emits only `CI_FAILURE`, or `MERGE_READY`, which needs
      an approval, a bot's included), so this watch's exit is the wake that re-runs this check; a
      failed check arrives as `CI_FAILURE` anyway, so on that exit there is nothing more to do; every

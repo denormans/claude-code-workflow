@@ -1,14 +1,34 @@
-# Background Watchers — Starting Them So They Stay Up
+# Background Jobs — Naming Them, and Keeping Watchers Running
 
 A **long-running watcher** is a command the workflow starts in the background and expects to keep
 running until its own condition fires: `gh pr checks … --watch` and
 `renovate-pr-monitor`. `pr-monitor` is not one: it registers the PR and returns at once, and the
 wake mod's check polls it. Builds, test runs and other commands that finish on their own are not
-watchers, and nothing here applies to them.
+watchers, and nothing here applies to them except the first section below, which covers every
+background job.
 
 PR changes reach the session through the wake mod, as board answers do, and the mod runs only in
 an interactive session while it is idle. A non-interactive session (`-p`, the Agent SDK, CI, cloud)
 gets no `[pr-monitor]` entry.
+
+## Name what every background job is waiting on
+
+Every command started with the Bash tool's `run_in_background: true` (a watcher, a `test-lock`
+test run, a build) and every Monitor gets a `description` that names:
+
+1. **The subject:** the PR as `<owner/repo>#<n>`, the branch, or what the tests cover.
+2. **The condition it waits for:** required CI green, the Renovate queue drained, the tests done.
+3. **What its exit means**, when you will act on that exit: `exit → re-check bots-satisfied`.
+
+For example:
+
+- `Wait for required CI on acme/api#512 (exit → re-check bots-satisfied)`
+- `Renovate monitor (acme): drain dependency PRs (exit → handle its JSON event per the runbook)`
+- `Run the dashboard item and session-state tests`
+
+A description that only restates the command (`gh pr checks --watch`) or names no subject
+(`Wait for CI`, `Background job`) does not meet this. Use the real PR, branch or feature names. A
+template's `<placeholder>` left unfilled in a description is the same failure.
 
 ## Start every watcher with the longest timeout
 

@@ -109,7 +109,11 @@ if command -v python3 >/dev/null 2>&1; then
   printf '{"pid": %s}' "$$" > "$NONOBJECT/b-no-session-id.json"
   printf '{"pid": %s, "sessionId": "live-id"}' "$$" > "$NONOBJECT/c-live.json"
 
-  PYTHON3="$(command -v python3)"
+  if [ -x /usr/bin/python3 ]; then
+    PYTHON3=/usr/bin/python3
+  else
+    PYTHON3="$(command -v python3)"
+  fi
   find_live() {
     PATH="${FIND_PATH:-$PATH}" AGENT_SESSION_SESSIONS_DIR="${2:-$SESSIONS}" "$PYTHON3" -I "$HANDLER_DIR/find-live-session.py" "$1"
   }
@@ -232,7 +236,7 @@ if command -v python3 >/dev/null 2>&1; then
   fi
 
   validate() {
-    python3 -I "$HANDLER_DIR/validate-link.py" "$@"
+    "$PYTHON3" -I "$HANDLER_DIR/validate-link.py" "$@"
   }
   GOOD_ITERM="FE3D8603-0F98-49DC-8E4D-B13BA170D3BA"
   GOOD_CLAUDE="4b3e4f28-49ff-4bef-8291-224c904879a1"
@@ -247,6 +251,152 @@ if command -v python3 >/dev/null 2>&1; then
   expect_line "an iTerm2 id that is not a UUID is refused" "the iTerm2 session id is not a UUID" validate "AB-12" "$GOOD_CLAUDE" "$TMP_ROOT"
   expect_line "a relative directory is refused" "the directory is not an existing absolute path" validate "$GOOD_ITERM" "$GOOD_CLAUDE" "relative/dir"
   expect_line "a missing directory is refused" "the directory is not an existing absolute path" validate "$GOOD_ITERM" "$GOOD_CLAUDE" "$TMP_ROOT/absent"
+
+  # --- launch-link.py ---
+  file_mode() {
+    python3 -I -c 'import os,stat,sys;print(format(stat.S_IMODE(os.lstat(sys.argv[1]).st_mode),"o"))' "$1"
+  }
+  LAUNCH_KEY_HEX="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  LAUNCH_CONFIG="$TMP_ROOT/launch-config"
+  mkdir -p "$LAUNCH_CONFIG"
+  printf '%s\n' "$LAUNCH_KEY_HEX" > "$LAUNCH_CONFIG/launch-key"
+  chmod 600 "$LAUNCH_CONFIG/launch-key"
+  NO_CONFIG="$TMP_ROOT/no-config"
+  launch_link() {
+    AGENT_SESSION_CONFIG_DIR="${LINK_CONFIG:-$LAUNCH_CONFIG}" TMPDIR="${LINK_TMPDIR:-$TMP_ROOT}" "$PYTHON3" -I "$HANDLER_DIR/launch-link.py" "$@"
+  }
+  # Signs as the board does: HMAC-SHA256 keyed by the hex-decoded key, over the context line and the
+  # fields, joined by newlines.
+  sign() {
+    python3 -I -c 'import hashlib,hmac,sys;print(hmac.new(bytes.fromhex(sys.argv[1]),"\n".join(["agent-session-launch-v1"]+sys.argv[2:]).encode(),hashlib.sha256).hexdigest())' "$LAUNCH_KEY_HEX" "$@"
+  }
+  LAUNCH_SESSION="5d9b3c1e-2f4a-4b6c-8d7e-9f0a1b2c3d4e"
+  MULTILINE_PROMPT=$'/workflow:jtbd start here\n\tsecond line with "quotes" and $HOME\n'
+  A200="$(printf 'a%.0s' $(seq 1 200))"
+  PROMPT_MAX="$(head -c 32768 /dev/zero | tr '\0' b)"
+
+  expect_silent "a launch link with a session, directory, title and multi-line prompt is accepted" launch_link validate "$LAUNCH_SESSION" "$TMP_ROOT" "My title" "$MULTILINE_PROMPT"
+  expect_silent "a launch link with no title is accepted" launch_link validate "$LAUNCH_SESSION" "$TMP_ROOT" "" "hi"
+  expect_silent "a title of exactly 200 characters is accepted" launch_link validate "$LAUNCH_SESSION" "$TMP_ROOT" "$A200" "hi"
+  expect_silent "a prompt of exactly 32 KiB is accepted" launch_link validate "$LAUNCH_SESSION" "$TMP_ROOT" "" "$PROMPT_MAX"
+  expect_line "a launch session id that is not a UUID is refused" "the session id is not a UUID" launch_link validate "abc" "$TMP_ROOT" "" "hi"
+  expect_line "a launch directory that does not exist is refused" "the directory is not an existing absolute path" launch_link validate "$LAUNCH_SESSION" "$TMP_ROOT/absent" "" "hi"
+  expect_line "a relative launch directory is refused" "the directory is not an existing absolute path" launch_link validate "$LAUNCH_SESSION" "relative" "" "hi"
+  expect_line "a control character in the launch directory is refused" "the directory contains a control character" launch_link validate "$LAUNCH_SESSION" $'/tmp\x15x' "" "hi"
+  expect_line "a newline in the title is refused" "the title contains a control character" launch_link validate "$LAUNCH_SESSION" "$TMP_ROOT" $'a\nb' "hi"
+  expect_line "a carriage return in the prompt is refused" "the prompt contains a control character other than tab or newline" launch_link validate "$LAUNCH_SESSION" "$TMP_ROOT" "" $'a\rb'
+  expect_line "an escape sequence in the prompt is refused" "the prompt contains a control character other than tab or newline" launch_link validate "$LAUNCH_SESSION" "$TMP_ROOT" "" $'a\x1b[2Jb'
+  expect_line "an empty prompt is refused" "the link has no prompt" launch_link validate "$LAUNCH_SESSION" "$TMP_ROOT" "" ""
+  expect_line "a C1 control character in the title is refused" "the title contains a control character" launch_link validate "$LAUNCH_SESSION" "$TMP_ROOT" "$(printf 't\xc2\x9bx')" "hi"
+  expect_line "a tag character in the prompt is refused, naming its code point" "the prompt contains an invisible character (U+E0052)" launch_link validate "$LAUNCH_SESSION" "$TMP_ROOT" "" "hi $(printf '\xf3\xa0\x81\x92')"
+  expect_line "a bidi override in the title is refused, naming its code point" "the title contains an invisible character (U+202E)" launch_link validate "$LAUNCH_SESSION" "$TMP_ROOT" "$(printf 'a\xe2\x80\xaeb')" "hi"
+  expect_line "a zero-width joiner in the directory is refused" "the directory contains an invisible character (U+200D)" launch_link validate "$LAUNCH_SESSION" "$TMP_ROOT$(printf '\xe2\x80\x8d')" "" "hi"
+  expect_line "a line separator in the title is refused" "the title contains an invisible character (U+2028)" launch_link validate "$LAUNCH_SESSION" "$TMP_ROOT" "$(printf 'a\xe2\x80\xa8b')" "hi"
+  expect_line "a variation selector from the supplement in the prompt is refused" "the prompt contains an invisible character (U+E0100)" launch_link validate "$LAUNCH_SESSION" "$TMP_ROOT" "" "hi $(printf '\xf3\xa0\x84\x80')"
+  expect_line "a format character added after Unicode 14 in the prompt is refused" "the prompt contains an invisible character (U+13439)" launch_link validate "$LAUNCH_SESSION" "$TMP_ROOT" "" "hi $(printf '\xf0\x93\x90\xb9')"
+  expect_line "an Arabic format character in the title is refused" "the title contains an invisible character (U+0890)" launch_link validate "$LAUNCH_SESSION" "$TMP_ROOT" "$(printf 'a\xe0\xa2\x90b')" "hi"
+  expect_line "a Hangul filler in the title is refused" "the title contains an invisible character (U+3164)" launch_link validate "$LAUNCH_SESSION" "$TMP_ROOT" "$(printf 'a\xe3\x85\xa4b')" "hi"
+  expect_line "a variation selector in the directory is refused" "the directory contains an invisible character (U+FE0F)" launch_link validate "$LAUNCH_SESSION" "$TMP_ROOT$(printf '\xef\xb8\x8f')" "" "hi"
+  expect_silent "an emoji with a presentation selector in the prompt is accepted" launch_link validate "$LAUNCH_SESSION" "$TMP_ROOT" "" "$(printf 'ok \xe2\x9d\xa4\xef\xb8\x8f')"
+  expect_silent "a zero-width joiner emoji sequence in the prompt and title is accepted" launch_link validate "$LAUNCH_SESSION" "$TMP_ROOT" "$(printf '\xf0\x9f\x91\xa8\xe2\x80\x8d\xf0\x9f\x91\xa9')" "$(printf '\xf0\x9f\x91\xa8\xe2\x80\x8d\xf0\x9f\x91\xa9')"
+  expect_line "a whitespace-only prompt is refused" "the link has no prompt" launch_link validate "$LAUNCH_SESSION" "$TMP_ROOT" "" $' \n\t'
+  expect_line "a title over 200 characters is refused" "the title is longer than 200 characters" launch_link validate "$LAUNCH_SESSION" "$TMP_ROOT" "${A200}a" "hi"
+  expect_line "a prompt over 32 KiB is refused" "the prompt is longer than 32 KiB" launch_link validate "$LAUNCH_SESSION" "$TMP_ROOT" "" "${PROMPT_MAX}b"
+
+  NOW="$(date +%s)"
+  FRESH_EXP="$((NOW + 60))"
+  GOOD_SIG="$(sign "$LAUNCH_SESSION" "$FRESH_EXP" "$TMP_ROOT" "My title" "$MULTILINE_PROMPT")"
+  verify_fresh() {
+    launch_link verify "$LAUNCH_SESSION" "$FRESH_EXP" "$TMP_ROOT" "My title" "$MULTILINE_PROMPT" "$1"
+  }
+  expect_line "a link the board signed, before it expires, is signed" "signed" verify_fresh "$GOOD_SIG"
+  expect_line "a changed prompt is unsigned" "unsigned" launch_link verify "$LAUNCH_SESSION" "$FRESH_EXP" "$TMP_ROOT" "My title" "${MULTILINE_PROMPT}x" "$GOOD_SIG"
+  expect_line "a changed directory is unsigned" "unsigned" launch_link verify "$LAUNCH_SESSION" "$FRESH_EXP" "/" "My title" "$MULTILINE_PROMPT" "$GOOD_SIG"
+  expect_line "a changed title is unsigned" "unsigned" launch_link verify "$LAUNCH_SESSION" "$FRESH_EXP" "$TMP_ROOT" "Other" "$MULTILINE_PROMPT" "$GOOD_SIG"
+  expect_line "a changed session id is unsigned" "unsigned" launch_link verify "5d9b3c1e-2f4a-4b6c-8d7e-9f0a1b2c3d4f" "$FRESH_EXP" "$TMP_ROOT" "My title" "$MULTILINE_PROMPT" "$GOOD_SIG"
+  expect_line "a changed expiry is unsigned" "unsigned" launch_link verify "$LAUNCH_SESSION" "$((FRESH_EXP + 1))" "$TMP_ROOT" "My title" "$MULTILINE_PROMPT" "$GOOD_SIG"
+  expect_line "a missing signature is unsigned" "unsigned" verify_fresh ""
+  expect_line "an uppercase signature is unsigned" "unsigned" verify_fresh "$(printf '%s' "$GOOD_SIG" | tr a-f A-F)"
+  expect_line "a non-ASCII signature is unsigned" "unsigned" verify_fresh "$(printf '\xc3\xa9')$GOOD_SIG"
+  PAST_EXP="$((NOW - 1))"
+  expect_line "a signed link past its expiry is expired" "expired" launch_link verify "$LAUNCH_SESSION" "$PAST_EXP" "$TMP_ROOT" "" "hi" "$(sign "$LAUNCH_SESSION" "$PAST_EXP" "$TMP_ROOT" "" "hi")"
+  FAR_EXP="$((NOW + 600))"
+  expect_line "a signed link expiring more than 150 s ahead is expired" "expired" launch_link verify "$LAUNCH_SESSION" "$FAR_EXP" "$TMP_ROOT" "" "hi" "$(sign "$LAUNCH_SESSION" "$FAR_EXP" "$TMP_ROOT" "" "hi")"
+  expect_line "a signed link whose expiry is not a number is expired" "expired" launch_link verify "$LAUNCH_SESSION" "soon" "$TMP_ROOT" "" "hi" "$(sign "$LAUNCH_SESSION" "soon" "$TMP_ROOT" "" "hi")"
+  LINK_CONFIG="$NO_CONFIG" expect_line "with no launch key every link is no-key" "no-key" verify_fresh "$GOOD_SIG"
+  OPEN_KEY_CONFIG="$TMP_ROOT/open-key-config"
+  mkdir -p "$OPEN_KEY_CONFIG"
+  printf '%s\n' "$LAUNCH_KEY_HEX" > "$OPEN_KEY_CONFIG/launch-key"
+  chmod 640 "$OPEN_KEY_CONFIG/launch-key"
+  LINK_CONFIG="$OPEN_KEY_CONFIG" expect_line "a launch key others can read is not trusted" "no-key" verify_fresh "$GOOD_SIG"
+  BAD_KEY_CONFIG="$TMP_ROOT/bad-key-config"
+  mkdir -p "$BAD_KEY_CONFIG"
+  printf 'not-a-hex-key\n' > "$BAD_KEY_CONFIG/launch-key"
+  chmod 600 "$BAD_KEY_CONFIG/launch-key"
+  LINK_CONFIG="$BAD_KEY_CONFIG" expect_line "a malformed launch key is not trusted" "no-key" verify_fresh "$GOOD_SIG"
+  DIR_KEY_CONFIG="$TMP_ROOT/dir-key-config"
+  mkdir -p "$DIR_KEY_CONFIG/launch-key"
+  LINK_CONFIG="$DIR_KEY_CONFIG" expect_line "a launch key path that is a directory is not trusted" "no-key" verify_fresh "$GOOD_SIG"
+
+  PROMPT_TMP="$TMP_ROOT/prompt-tmp"
+  mkdir -p "$PROMPT_TMP"
+  LINK_TMPDIR="$PROMPT_TMP" capture launch_link write-prompt "$MULTILINE_PROMPT"
+  check "write-prompt exits 0" "0" "$CAP_RC"
+  PROMPT_PATH="$(cat "$CAP_OUT")"
+  check "the prompt file is in the agent-session folder under TMPDIR" "$PROMPT_TMP/agent-session" "$(dirname "$PROMPT_PATH")"
+  printf '%s' "$MULTILINE_PROMPT" > "$CAP_EXP"
+  cmp -s "$PROMPT_PATH" "$CAP_EXP"
+  check "the prompt file holds the prompt byte for byte" "0" "$?"
+  check "the prompt file is readable only by its owner" "600" "$(file_mode "$PROMPT_PATH")"
+  check "the prompt folder is private" "700" "$(file_mode "$PROMPT_TMP/agent-session")"
+  OLD_PROMPT="$PROMPT_TMP/agent-session/prompt-old.txt"
+  : > "$OLD_PROMPT"
+  touch -t 202001010000 "$OLD_PROMPT"
+  LINK_TMPDIR="$PROMPT_TMP" capture launch_link write-prompt "again"
+  [ ! -e "$OLD_PROMPT" ]
+  check "a prompt file left from more than a day ago is removed" "0" "$?"
+  [ -e "$PROMPT_PATH" ]
+  check "a recent prompt file is kept" "0" "$?"
+  SHARED_TMP="$TMP_ROOT/shared-tmp"
+  mkdir -p "$SHARED_TMP/agent-session"
+  chmod 777 "$SHARED_TMP/agent-session"
+  LINK_TMPDIR="$SHARED_TMP" expect_failure "a prompt folder others can write to is refused" 1 "$SHARED_TMP/agent-session is not a private directory owned by this user" launch_link write-prompt "hi"
+
+  build_launch() {
+    LINK_CONFIG="${TEMPLATE_DIR:-$NO_CONFIG}" launch_link build-command "$@"
+  }
+  DEFAULT_LAUNCH="cd '/p q' && AGENT_SESSION_LAUNCH='5d9b3c1e-2f4a-4b6c-8d7e-9f0a1b2c3d4e' AGENT_SESSION_TITLE='it'\\''s' claude --session-id '5d9b3c1e-2f4a-4b6c-8d7e-9f0a1b2c3d4e' -n 'it'\\''s' -- \"\$(cat '/t/f' && rm -f '/t/f')\""
+  expect_line "no template file uses the default launch command" "$DEFAULT_LAUNCH" build_launch "$LAUNCH_SESSION" "/p q" "it's" "/t/f"
+  UNTITLED_LAUNCH="cd '/p' && AGENT_SESSION_LAUNCH='5d9b3c1e-2f4a-4b6c-8d7e-9f0a1b2c3d4e' AGENT_SESSION_TITLE='' claude --session-id '5d9b3c1e-2f4a-4b6c-8d7e-9f0a1b2c3d4e'  -- \"\$(cat '/t/f' && rm -f '/t/f')\""
+  expect_line "with no title the default command passes no -n" "$UNTITLED_LAUNCH" build_launch "$LAUNCH_SESSION" "/p" "" "/t/f"
+  TEMPLATE_DIR="$TMP_ROOT/template-config"
+  mkdir -p "$TEMPLATE_DIR"
+  printf '   \n' > "$TEMPLATE_DIR/launch-command"
+  TEMPLATE_DIR="$TEMPLATE_DIR" expect_line "a blank template file uses the default launch command" "$DEFAULT_LAUNCH" build_launch "$LAUNCH_SESSION" "/p q" "it's" "/t/f"
+  printf 'cd {cwd} && claude {name} {prompt} # {session} {unknown}\r\nsecond line {cwd}\n' > "$TEMPLATE_DIR/launch-command"
+  TEMPLATE_DIR="$TEMPLATE_DIR" expect_line "a custom template's first line is used, carriage return removed, other braces kept" "cd '/p' && claude -n 't' \"\$(cat '/t/f' && rm -f '/t/f')\" # '5d9b3c1e-2f4a-4b6c-8d7e-9f0a1b2c3d4e' {unknown}" build_launch "$LAUNCH_SESSION" "/p" "t" "/t/f"
+  printf '{name} {session}\n' > "$TEMPLATE_DIR/launch-command"
+  TEMPLATE_DIR="$TEMPLATE_DIR" expect_line "a placeholder inside a substituted value is not expanded again" "-n '{session}' '5d9b3c1e-2f4a-4b6c-8d7e-9f0a1b2c3d4e'" build_launch "$LAUNCH_SESSION" "/p" "{session}" "/t/f"
+
+  RUN_DIR="$TMP_ROOT/run dir"
+  mkdir -p "$RUN_DIR"
+  printf 'cd {cwd} && printf %%s {prompt} > got\n' > "$TEMPLATE_DIR/launch-command"
+  TRICKY_PROMPT=$'line one "double" \'single\' $HOME `date` \\back\n\tline two'
+  for run_shell in bash zsh; do
+    if command -v "$run_shell" >/dev/null 2>&1; then
+      rm -f "$RUN_DIR/got"
+      RUN_PROMPT_FILE="$(LINK_TMPDIR="$PROMPT_TMP" launch_link write-prompt "$TRICKY_PROMPT")"
+      RUN_COMMAND="$(TEMPLATE_DIR="$TEMPLATE_DIR" build_launch "$LAUNCH_SESSION" "$RUN_DIR" "" "$RUN_PROMPT_FILE")"
+      "$run_shell" -c "$RUN_COMMAND"
+      printf '%s' "$TRICKY_PROMPT" > "$CAP_EXP"
+      cmp -s "$RUN_DIR/got" "$CAP_EXP"
+      check "$run_shell: the typed command delivers the prompt byte for byte" "0" "$?"
+      [ ! -e "$RUN_PROMPT_FILE" ]
+      check "$run_shell: the typed command deletes the prompt file" "0" "$?"
+    else
+      echo "SKIP: $run_shell not installed (launch command round trip)"
+    fi
+  done
 else
   echo "SKIP: python3 not available (find-live-session.py)"
 fi
@@ -261,11 +411,11 @@ if command -v osascript >/dev/null 2>&1 && command -v osacompile >/dev/null 2>&1
       -e "tell handlerScript to parseAgentURL(\"$1\")"
   }
 
-  expect_line "full URL with a percent-encoded cwd containing a space" "hostName:iterm, itermId:AB-12, claudeId:c1, launchDir:/a b/c" parse 'agent-session://iterm/AB-12?claude=c1&cwd=%2Fa%20b%2Fc'
+  expect_line "full URL with a percent-encoded cwd containing a space" "hostName:iterm, itermId:AB-12, claudeId:c1, launchDir:/a b/c, sessionId:, expiry:, launchTitle:, launchPrompt:, signature:" parse 'agent-session://iterm/AB-12?claude=c1&cwd=%2Fa%20b%2Fc'
 
-  expect_line "unknown host is returned as-is for the caller to refuse" "hostName:other, itermId:x, claudeId:, launchDir:" parse 'agent-session://other/x'
+  expect_line "unknown host is returned as-is for the caller to refuse" "hostName:other, itermId:x, claudeId:, launchDir:, sessionId:, expiry:, launchTitle:, launchPrompt:, signature:" parse 'agent-session://other/x'
 
-  expect_line "URL missing the claude param leaves claudeId empty" "hostName:iterm, itermId:AB-12, claudeId:, launchDir:/d" parse 'agent-session://iterm/AB-12?cwd=%2Fd'
+  expect_line "URL missing the claude param leaves claudeId empty" "hostName:iterm, itermId:AB-12, claudeId:, launchDir:/d, sessionId:, expiry:, launchTitle:, launchPrompt:, signature:" parse 'agent-session://iterm/AB-12?cwd=%2Fd'
 
   build() {
     osascript -e "set handlerScript to load script POSIX file \"$TMP_ROOT/handler.scpt\"" \
@@ -280,7 +430,7 @@ if command -v osascript >/dev/null 2>&1 && command -v osacompile >/dev/null 2>&1
   export AGENT_SESSION_HANDLER_DIR="$HANDLER_DIR"
   check_url() {
     osascript -e "set handlerScript to load script POSIX file \"$TMP_ROOT/handler.scpt\"" \
-      -e "tell handlerScript to checkAgentURL(\"$1\")"
+      -e "tell handlerScript to checkAgentURL(parseAgentURL(\"$1\"))"
   }
   GOOD_URL="agent-session://iterm/$GOOD_ITERM?claude=$GOOD_CLAUDE&cwd=$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=""))' "$TMP_ROOT")"
   expect_line "a well-formed link passes the whole check" "" check_url "$GOOD_URL"
@@ -330,6 +480,62 @@ if command -v osascript >/dev/null 2>&1 && command -v osacompile >/dev/null 2>&1
   expect_line "output that is not pid and tty is unknown" "unknown" classify 'garbage'
   expect_line "a non-numeric pid is unknown" "unknown" classify "abc"$'\t'"ttys012"
   expect_line "a live process with a tty reports it" "ttys012" classify "123"$'\t'"ttys012"
+
+  # --- launch links ---
+  in_handler() {
+    osascript -e "set handlerScript to load script POSIX file \"$TMP_ROOT/handler.scpt\"" -e "tell handlerScript to $1"
+  }
+  enc() {
+    python3 -I -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=""))' "$1"
+  }
+  launch_url() {
+    printf 'agent-session://launch?session=%s&exp=%s&cwd=%s&title=%s&prompt=%s&sig=%s' "$(enc "$1")" "$(enc "$2")" "$(enc "$3")" "$(enc "$4")" "$(enc "$5")" "$(enc "$6")"
+  }
+  expect_line "a launch link takes the launch path" "launch" in_handler 'linkPath(parseAgentURL("agent-session://launch?session=x"))'
+  expect_line "an iterm link takes the resume path" "resume" in_handler 'linkPath(parseAgentURL("agent-session://iterm/AB-12?claude=c1&cwd=%2Fd"))'
+  expect_line "a link with an unknown host takes the resume path, where it is refused" "resume" in_handler 'linkPath(parseAgentURL("agent-session://other/x"))'
+  expect_line "a launch link's fields are decoded, a plus as a space and %2B as a plus" "hostName:launch, itermId:, claudeId:, launchDir:/a b, sessionId:S1, expiry:123, launchTitle:T x, launchPrompt:p+q, signature:ab" in_handler 'parseAgentURL("agent-session://launch?session=S1&exp=123&cwd=%2Fa%20b&title=T+x&prompt=p%2Bq&sig=ab")'
+  expect_line "a launch link without a title decodes it as empty" "hostName:launch, itermId:, claudeId:, launchDir:, sessionId:S1, expiry:, launchTitle:, launchPrompt:hi, signature:" in_handler 'parseAgentURL("agent-session://launch?session=S1&prompt=hi")'
+  expect_line "a decoded multi-line prompt keeps every line feed, the last one included" $'a\nb\n' in_handler 'launchPrompt of parseAgentURL("agent-session://launch?prompt=a%0Ab%0A")'
+
+  SIGNED_URL="$(launch_url "$LAUNCH_SESSION" "$FRESH_EXP" "$TMP_ROOT" "My title" "$MULTILINE_PROMPT" "$GOOD_SIG")"
+  TAMPERED_URL="$(launch_url "$LAUNCH_SESSION" "$FRESH_EXP" "$TMP_ROOT" "My title" "${MULTILINE_PROMPT}rm -rf ~" "$GOOD_SIG")"
+  MISSING_DIR_URL="$(launch_url "$LAUNCH_SESSION" "$FRESH_EXP" "$TMP_ROOT/absent" "My title" "$MULTILINE_PROMPT" "$GOOD_SIG")"
+  launch_check() {
+    AGENT_SESSION_HANDLER_DIR="$HANDLER_DIR" AGENT_SESSION_CONFIG_DIR="${LINK_CONFIG:-$LAUNCH_CONFIG}" TMPDIR="$PROMPT_TMP" in_handler "$1(parseAgentURL(\"$2\"))"
+  }
+  expect_line "the handler reads a board-signed multi-line launch link as signed" "signed" launch_check launchTrust "$SIGNED_URL"
+  expect_line "the handler reads a launch link with a changed prompt as unsigned" "unsigned" launch_check launchTrust "$TAMPERED_URL"
+  LINK_CONFIG="$NO_CONFIG" expect_line "the handler reads every launch link as no-key when there is no key" "no-key" launch_check launchTrust "$SIGNED_URL"
+  expect_line "the handler accepts a well-formed launch link" "" launch_check launchRefusal "$SIGNED_URL"
+  expect_line "the handler refuses a launch link whose directory does not exist" "the directory is not an existing absolute path" launch_check launchRefusal "$MISSING_DIR_URL"
+  NUL_TITLE_URL="agent-session://launch?session=$LAUNCH_SESSION&cwd=$(enc "$TMP_ROOT")&title=a%00b&prompt=hi"
+  NUL_PROMPT_URL="agent-session://launch?session=$LAUNCH_SESSION&cwd=$(enc "$TMP_ROOT")&prompt=a%00b"
+  expect_line "a NUL in a launch title is refused with a reason" "the title contains a control character" launch_check launchRefusal "$NUL_TITLE_URL"
+  expect_line "a NUL in a launch prompt is refused with a reason" "the prompt contains a control character other than tab or newline" launch_check launchRefusal "$NUL_PROMPT_URL"
+  expect_line "a NUL in a resume link's directory is refused with a reason" "the directory contains a control character" check_url "agent-session://iterm/$GOOD_ITERM?claude=$GOOD_CLAUDE&cwd=%2Ftmp%00x"
+
+  P2000="$(head -c 2000 /dev/zero | tr '\0' x)"
+  expect_line "a signed link opens without asking, whatever its prompt length" "open" in_handler "launchGate(\"signed\", \"${P2000}${P2000}\")"
+  expect_line "an unsigned link asks first" "confirm" in_handler 'launchGate("unsigned", "hi")'
+  expect_line "an expired link asks first" "confirm" in_handler 'launchGate("expired", "hi")'
+  expect_line "a link with no key asks first" "confirm" in_handler 'launchGate("no-key", "hi")'
+  expect_line "an unrecognised trust status asks first" "confirm" in_handler 'launchGate("garbage", "hi")'
+  expect_line "an unsigned prompt of exactly 2000 characters asks first" "confirm" in_handler "launchGate(\"unsigned\", \"$P2000\")"
+  expect_line "an unsigned prompt over 2000 characters is refused" "refuse" in_handler "launchGate(\"unsigned\", \"${P2000}x\")"
+
+  HANDLER_RUN_DIR="$TMP_ROOT/handler run"
+  mkdir -p "$HANDLER_RUN_DIR"
+  printf 'cd {cwd} && printf %%s {prompt} > got\n' > "$TEMPLATE_DIR/launch-command"
+  RUN_URL="$(launch_url "$LAUNCH_SESSION" "$FRESH_EXP" "$HANDLER_RUN_DIR" "" "$TRICKY_PROMPT" "")"
+  LINK_CONFIG="$TEMPLATE_DIR" capture launch_check prepareLaunchCommand "$RUN_URL"
+  check "the handler prepares a launch command" "0" "$CAP_RC"
+  bash -c "$(cat "$CAP_OUT")"
+  printf '%s' "$TRICKY_PROMPT" > "$CAP_EXP"
+  cmp -s "$HANDLER_RUN_DIR/got" "$CAP_EXP"
+  check "the handler's launch command delivers the decoded prompt byte for byte" "0" "$?"
+
+  expect_line "a resume link with an unknown host is still refused" "unknown host" check_url "agent-session://other/$GOOD_ITERM"
 else
   echo "SKIP: osascript/osacompile not available (handler.applescript)"
 fi
