@@ -146,9 +146,13 @@ line is read, carriage returns are removed, and a missing or blank file means th
 
 Everything else is typed as written, including braces that are not one of these placeholders. Keep
 `--` before `{prompt}`, so that a prompt starting with `-` is not read as an option. Keep the two
-`AGENT_SESSION_` variables: they give the session its launch id and title in its environment. The
-command uses POSIX shell syntax (`&&`, `$(…)`, `NAME=value command`), which bash and zsh accept. For
-example, to load `.env.local` and choose a model:
+`AGENT_SESSION_` variables. The plugin's SessionStart hook reads them. When `AGENT_SESSION_LAUNCH`
+matches the new session's id, it tells the session to invoke the board skill before its first reply,
+and when `AGENT_SESSION_TITLE` is also not empty, it opens the session's board card under that title
+before any workflow runs. A `claude` process that the session starts later
+inherits both variables but has its own id, so it doesn't take the title. The command uses POSIX
+shell syntax (`&&`, `$(…)`, `NAME=value command`), which bash and zsh accept. For example, to load
+`.env.local` and choose a model:
 
 ```
 cd {cwd} && { [ ! -f .env.local ] || source .env.local; } && AGENT_SESSION_LAUNCH={session} AGENT_SESSION_TITLE={title} claude --model opus --session-id {session} {name} -- {prompt}

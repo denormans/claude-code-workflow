@@ -148,9 +148,11 @@ import {
   runItemDropDeferred,
   runItemListDeferred,
   runItemFlushDeferred,
+  runLaunchTitle,
 } from './item.ts'
+import { runEnter, DashboardEnterRefusal } from './enter.ts'
 import { loadState, stateFilePath, saveState, type DeferredQuestion } from './state.ts'
-import { upsertRegistryNode, registryFilePath } from './registry.ts'
+import { upsertRegistryNode, registryFilePath, loadRegistry } from './registry.ts'
 import { loadWorkflowState } from '../workflow-state/state.ts'
 import { sessionGlobalScope, storePath } from '../workflow-store/store.ts'
 import { escapeRegExp } from '../check-refs/escape-regexp.ts'
@@ -414,10 +416,98 @@ test('runItemAdd: no node for this session — opens a conversation node, then p
   const registerAt = calls.findIndex((c) => c.startsWith('session register'))
   assert.ok(registerAt >= 0, 'a node was registered')
   assert.ok(calls[registerAt]!.includes('--phase conversation'))
-  assert.ok(calls[registerAt]!.includes('--title What should we build?'))
+  assert.ok(calls[registerAt]!.includes('--title=What should we build?'))
   const postAt = calls.findIndex((c) => c.startsWith('item add --session conv-node'))
   assert.ok(postAt > registerAt, 'the item is posted to the new node after it registers')
   assert.equal(loadWorkflowState(process.env.CLAUDE_CODE_SESSION_ID!), null)
+})
+
+// The whole register call for a session's minted root (`<session>_<8 hex>`), the title as one token.
+const rootRegisterCall = (session: string, title: string): RegExp =>
+  new RegExp(
+    `^session register --system-id claude-workflow --external-id ${escapeRegExp(session)}_[0-9a-f]{8} ` +
+      `--phase conversation --title=${escapeRegExp(title)}$`
+  )
+
+test('runLaunchTitle: no node for the session — opens its root under the launch title, no workflow state', () => {
+  process.env.AI_WORKFLOW_APP_BIN = writeConversationStub(tmpDir)
+  const session = process.env.CLAUDE_CODE_SESSION_ID!
+
+  const out = captureStdoutAssertingSuccess(() =>
+    runLaunchTitle(session, 'Fix the flaky login test')
+  )
+
+  assert.equal(out, '')
+  const register = readCalls(tmpDir).filter((c) => c.startsWith('session register'))
+  assert.equal(register.length, 1, 'exactly one root registers')
+  assert.match(register[0]!, rootRegisterCall(session, 'Fix the flaky login test'))
+  assert.equal(loadWorkflowState(session), null, 'opening it grants no edit rights')
+})
+
+test('runLaunchTitle: a flag-shaped title reaches the register call as the single token --title=--help', () => {
+  process.env.AI_WORKFLOW_APP_BIN = writeConversationStub(tmpDir)
+  const session = process.env.CLAUDE_CODE_SESSION_ID!
+
+  captureStdoutAssertingSuccess(() => runLaunchTitle(session, '--help'))
+
+  const register = readCalls(tmpDir).filter((c) => c.startsWith('session register'))
+  assert.equal(register.length, 1)
+  assert.match(register[0]!, rootRegisterCall(session, '--help'))
+})
+
+test('runLaunchTitle: --session targets that session, not the env session', () => {
+  process.env.AI_WORKFLOW_APP_BIN = writeConversationStub(tmpDir)
+  const target = `${process.env.CLAUDE_CODE_SESSION_ID!}-launched`
+
+  captureStdoutAssertingSuccess(() => runLaunchTitle(target, 'Launched'))
+
+  const register = readCalls(tmpDir).filter((c) => c.startsWith('session register'))
+  assert.equal(register.length, 1)
+  assert.match(register[0]!, rootRegisterCall(target, 'Launched'))
+})
+
+test('runLaunchTitle: the session already has a node — registers nothing', () => {
+  process.env.AI_WORKFLOW_APP_BIN = writeConversationStub(tmpDir)
+  const session = process.env.CLAUDE_CODE_SESSION_ID!
+  registerRootNode(session)
+
+  captureStdoutAssertingSuccess(() => runLaunchTitle(session, 'Launched'))
+
+  assert.deepEqual(readCalls(tmpDir), [])
+})
+
+test('runLaunchTitle: no board — silent no-op', () => {
+  const session = process.env.CLAUDE_CODE_SESSION_ID!
+
+  const stderr = captureStderr(() =>
+    captureStdoutAssertingSuccess(() => runLaunchTitle(session, 'Launched'))
+  )
+
+  assert.equal(stderr, '')
+  assert.deepEqual(readCalls(tmpDir), [])
+})
+
+test('runLaunchTitle then the first workflow enter --title: renamed, not refused; a later different title is refused', () => {
+  process.env.AI_WORKFLOW_APP_BIN = writeConversationStub(tmpDir)
+  const session = process.env.CLAUDE_CODE_SESSION_ID!
+  captureStdoutAssertingSuccess(() => runLaunchTitle(session, 'Launched'))
+
+  assert.doesNotThrow(() => runEnter(undefined, 'jtbd', 'Workflow title'))
+  assert.equal(exitCodeIsError(), false)
+
+  assert.throws(
+    () => runEnter(undefined, 'jtbd', 'A third title'),
+    (err: unknown) =>
+      err instanceof DashboardEnterRefusal &&
+      err.message ===
+        `dashboard session enter: refusing to rename a node that already exists.\n` +
+          `  node:     ${loadRegistry(session)[0]!.externalId}\n` +
+          `  current:  Workflow title\n` +
+          `  --title:  A third title\n` +
+          `A node entered earlier in this session keeps its title. Omit --title on a phase re-enter — ` +
+          `the existing title is preserved automatically. Pass --retitle only if you really mean to ` +
+          `rename it.`
+  )
 })
 
 // The title the conversation node registers with: the register call's `--title` is its last
@@ -426,7 +516,7 @@ const registeredTitle = (prompt: string): string => {
   process.env.AI_WORKFLOW_APP_BIN = writeConversationStub(tmpDir)
   captureStdout(() => runItemAdd('question', prompt, questionDecl))
   const line = readCalls(tmpDir).find((c) => c.startsWith('session register')) ?? ''
-  const flag = '--title '
+  const flag = '--title='
   assert.ok(line.includes(flag), line)
   return line.slice(line.indexOf(flag) + flag.length)
 }
@@ -2916,7 +3006,7 @@ test('question gate: --type approval is unaffected — no declaration line, raw 
   const addCall = calls.find((c) => c.includes('item add'))
   assert.ok(addCall !== undefined, 'item add was called')
   assert.ok(
-    addCall!.includes('--prompt Please approve the doc'),
+    addCall!.includes('--prompt=Please approve the doc'),
     'raw prompt reaches the stub unmodified'
   )
   assert.ok(!addCall!.includes('Recommend'), 'no declaration line inserted')
@@ -5617,7 +5707,7 @@ test('info note: an app that predates info refuses loudly and nothing is recorde
   assert.equal(stdoutOut, '', 'no itemId printed')
   assert.equal(
     stderrOut,
-    `dashboard: ai-workflow-app item add --session ${sessionId} --type info --prompt A note failed: Expected one of question|approval for --type, got info\n`
+    `dashboard: ai-workflow-app item add --session ${sessionId} --type info --prompt=A note failed: Expected one of question|approval for --type, got info\n`
   )
   assert.equal(getRequestedExitCode(), 1, 'exit code is exactly 1')
   assert.equal(loadState(sessionId), null, 'nothing recorded')
@@ -5645,7 +5735,7 @@ test('runItemAdd: references pass to the app as its own --answers/--replaces/--r
   const call = readCalls(tmpDir).find((c) => c.startsWith('item add'))
   assert.ok(
     call?.includes(
-      '--type info --answers comment-1 --replaces old-1 --related approval-1 --prompt The migration'
+      '--type info --answers comment-1 --replaces old-1 --related approval-1 --prompt=The migration'
     ),
     `each reference reaches the app as its own flag, got: ${String(call)}`
   )

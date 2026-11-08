@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url'
 import { loadState, saveState, stateFilePath } from '../dashboard/state.ts'
 import { loadRegistry, registryFilePath, upsertRegistryNode } from '../dashboard/registry.ts'
 import { stderrBeyondNodeWarnings } from '../testing/subprocess-stderr.ts'
+import { escapeRegExp } from '../check-refs/escape-regexp.ts'
 
 // ---------------------------------------------------------------------------
 // No commands/*.ts test convention exists in this codebase (commands/ is thin Stricli glue over
@@ -195,6 +196,24 @@ const writeBranchingStub = (dir: string, sessionListOut: string, otherOut: strin
       `else\n` +
       `  echo ${JSON.stringify(otherOut)}\n` +
       `fi\nexit 0\n`
+  )
+  chmodSync(path, 0o755)
+  return path
+}
+
+/** Stub that answers `session list` with an empty board, `session register` with a fresh active
+ * root, and every other verb with an itemId — the shape a session no workflow entered meets. */
+const writeConversationStub = (dir: string): string => {
+  const path = join(dir, `ai-workflow-app-${writeStubCounter++}`)
+  writeFileSync(
+    path,
+    `#!/usr/bin/env bash\n` +
+      `echo "$@" >> ${JSON.stringify(join(dir, 'calls.log'))}\n` +
+      `if [ "$1" = "session" ] && [ "$2" = "list" ]; then echo '[]'; exit 0; fi\n` +
+      `if [ "$1" = "session" ] && [ "$2" = "register" ]; then\n` +
+      `  echo '{"id":"conv-node","parentId":null,"lifecycle":"active"}'; exit 0\n` +
+      `fi\n` +
+      `echo '{"itemId":"item-1"}'\nexit 0\n`
   )
   chmodSync(path, 0o755)
   return path
@@ -673,7 +692,7 @@ test('CLI FLOW-453: a teammate with no node of its own posts its note to its lea
 
   assert.equal(status, 0, stderr)
   assert.deepEqual(readCalls(tmpDir), [
-    'item add --session lead-node-1 --type info --prompt a run has held the lock for 1h00m',
+    'item add --session lead-node-1 --type info --prompt=a run has held the lock for 1h00m',
   ])
 })
 
@@ -1094,7 +1113,7 @@ test('CLI: item add passes repeated --answers/--replaces/--related through to th
   assert.equal(stdout, infoPostStdout('note-ref-1', rawId), 'prints the itemId and the reminder')
   assert.ok(
     readRawCalls(tmpDir).includes(
-      '--type info --answers c1 --replaces w1 --related r1 --related r2 --prompt Done'
+      '--type info --answers c1 --replaces w1 --related r1 --related r2 --prompt=Done'
     ),
     'every reference, repeats included, reached the app'
   )
@@ -2366,6 +2385,43 @@ test('CLI: dashboard session refresh-return links the root, reuses the recorded 
     assert.equal(run.stdout, '')
     assert.equal(stderrBeyondNodeWarnings(run.stderr), '')
   }
+})
+
+test('CLI: dashboard session launch-title opens the root under the title and prints nothing', () => {
+  const stubBin = writeConversationStub(tmpDir)
+  const target = `${rawId}-launched`
+
+  const run = runCli(
+    ['dashboard', 'session', 'launch-title', '--session', target, '--title', 'Launched'],
+    { AI_WORKFLOW_APP_BIN: stubBin, CLAUDE_CODE_SESSION_ID: target }
+  )
+
+  assert.equal(run.status, 0, stderrBeyondNodeWarnings(run.stderr))
+  assert.equal(run.stdout, '')
+  assert.equal(stderrBeyondNodeWarnings(run.stderr), '')
+  const register = readCalls(tmpDir).filter((c) => c.startsWith('session register'))
+  assert.equal(register.length, 1)
+  assert.match(
+    register[0]!,
+    new RegExp(
+      `^session register --system-id claude-workflow --external-id ${escapeRegExp(target)}_[0-9a-f]{8} ` +
+        '--phase conversation --title=Launched$'
+    )
+  )
+})
+
+test('CLI: dashboard session launch-title refuses a blank --title', () => {
+  const run = runCli(
+    ['dashboard', 'session', 'launch-title', '--session', rawId, '--title', '  '],
+    { CLAUDE_CODE_SESSION_ID: rawId }
+  )
+
+  assert.equal(run.status, 252)
+  assert.equal(run.stdout, '')
+  assert.equal(
+    stderrBeyondNodeWarnings(run.stderr),
+    'Failed to parse "  " for title: --title must not be blank'
+  )
 })
 
 test('CLI: dashboard session refresh-return --session targets that session’s root, not the env session’s', () => {

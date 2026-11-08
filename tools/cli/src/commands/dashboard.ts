@@ -14,6 +14,7 @@ import {
   runItemDropDeferred,
   runItemListDeferred,
   runItemFlushDeferred,
+  runLaunchTitle,
 } from '../dashboard/item.ts'
 import { runItemShow } from '../dashboard/show.ts'
 import type { WhyMine } from '../dashboard/state.ts'
@@ -341,11 +342,39 @@ const refreshReturnCommand = buildCommand({
   },
 })
 
+const launchTitleCommand = buildCommand({
+  docs: {
+    brief:
+      'Open a board-launched session’s root under its launch title (SessionStart hook only; no-op when a root exists)',
+  },
+  parameters: {
+    flags: {
+      session: {
+        kind: 'parsed',
+        parse: parseNonBlankString('--session'),
+        brief: 'The launched session’s id',
+        optional: false,
+      },
+      title: {
+        kind: 'parsed',
+        parse: parseNonBlankString('--title'),
+        brief: 'The title the board launched it with',
+        optional: false,
+      },
+    },
+    positional: { kind: 'tuple', parameters: [] },
+  },
+  func(flags: { session: string; title: string }) {
+    runLaunchTitle(flags.session, flags.title)
+  },
+})
+
 const sessionRoutes = buildRouteMap({
   routes: {
     enter: enterCommand,
     key: keyCommand,
     'refresh-return': refreshReturnCommand,
+    'launch-title': launchTitleCommand,
     leave: leaveCommand,
     heartbeat: heartbeatCommand,
     wait: waitCommand,

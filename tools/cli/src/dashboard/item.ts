@@ -9,6 +9,7 @@ import { sessionGlobalScope, storePath } from '../workflow-store/store.ts'
 import { runEnter } from './enter.ts'
 import {
   dashboardAvailable,
+  flagValueArgs,
   invokeDashboard,
   resolveDashboardBin,
   invokeDashboardBin,
@@ -119,6 +120,25 @@ const NO_BOARD_EXIT = 3
 
 // What a board app whose `consume --session` flag is still required prints when `--session` is omitted.
 const missingSessionFlagMessage = 'Expected input for flag --session'
+
+// The SessionStart step for a session the board launched with a title (hooks/session-return.sh):
+// opens its root in the conversation phase under that title, the way a first `item add` opens one,
+// so the board shows the title before any workflow runs. Like that node it records no title of its
+// own and grants no edit rights, so the first workflow `enter --title` renames it without being
+// refused. A no-op when the session already has a node or there is no board.
+export const runLaunchTitle = (session: string, title: string): void => {
+  const bin = resolveDashboardBin()
+  if (bin === null) {
+    return
+  }
+
+  try {
+    openConversationNodeUnderLock(title, bin, undefined, session)
+  } catch (err) {
+    process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`)
+    setRequestedExitCode(1)
+  }
+}
 
 // add: post a question/approval item and record its id so the wake check knows a wait is pending and
 // reconcile can clear it — or post an info note, whose id is never recorded: nothing answers a note,
@@ -287,8 +307,7 @@ export const runItemAdd = (
     '--type',
     type,
     ...referenceArgs(references),
-    '--prompt',
-    composedPrompt,
+    ...flagValueArgs('--prompt', composedPrompt),
   ])
   if (out === null) return
   const itemId = usableItemId(out)
@@ -369,7 +388,7 @@ const ensureConversationNode = (
   beforeOpen?: () => boolean
 ): boolean => {
   try {
-    return openConversationNodeUnderLock(prompt, bin, beforeOpen)
+    return openConversationNodeUnderLock(conversationTitle(prompt), bin, beforeOpen)
   } catch (err) {
     process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`)
     setRequestedExitCode(1)
@@ -378,11 +397,12 @@ const ensureConversationNode = (
 }
 
 const openConversationNodeUnderLock = (
-  prompt: string,
+  title: string,
   bin: string,
-  beforeOpen?: () => boolean
+  beforeOpen?: () => boolean,
+  session?: string
 ): boolean => {
-  const rawId = tryResolveRawSessionId()
+  const rawId = tryResolveRawSessionId(session)
   if (rawId === null || registryMayHoldNodes(rawId)) {
     return true
   }
@@ -413,16 +433,7 @@ const openConversationNodeUnderLock = (
       return false
     }
 
-    runEnter(
-      undefined,
-      CONVERSATION_PHASE,
-      conversationTitle(prompt),
-      undefined,
-      undefined,
-      false,
-      undefined,
-      false
-    )
+    runEnter(undefined, CONVERSATION_PHASE, title, undefined, session, false, undefined, false)
     return getRequestedExitCode() === exitBefore
   } finally {
     releaseLockAt(lockPath)
@@ -1226,8 +1237,7 @@ export const runItemFlushDeferred = (
       '--type',
       'question',
       ...referenceArgs(entry.references ?? []),
-      '--prompt',
-      composeDeferredEntry(entry, context),
+      ...flagValueArgs('--prompt', composeDeferredEntry(entry, context)),
     ])
     // invokeDashboardBin has already written the failure to stderr and set exit 1.
     if (out === null) {
@@ -1386,7 +1396,12 @@ export const runItemAnswer = (
   session?: string,
   key?: string
 ): void =>
-  resolveItem(['item', 'answer', '--item', item, '--response', response], item, session, key)
+  resolveItem(
+    ['item', 'answer', '--item', item, ...flagValueArgs('--response', response)],
+    item,
+    session,
+    key
+  )
 export const runItemApprove = (
   item: string,
   note: string | undefined,
@@ -1395,14 +1410,19 @@ export const runItemApprove = (
 ): void =>
   resolveItem(
     note
-      ? ['item', 'approve', '--item', item, '--note', note]
+      ? ['item', 'approve', '--item', item, ...flagValueArgs('--note', note)]
       : ['item', 'approve', '--item', item],
     item,
     session,
     key
   )
 export const runItemReject = (item: string, note: string, session?: string, key?: string): void =>
-  resolveItem(['item', 'reject', '--item', item, '--note', note], item, session, key)
+  resolveItem(
+    ['item', 'reject', '--item', item, ...flagValueArgs('--note', note)],
+    item,
+    session,
+    key
+  )
 
 // withdraw: single item, or all pending for the session (cleanup path). Returns whether the
 // board-side withdraw invocation succeeded — not whether the local ledger ended up cleared: a

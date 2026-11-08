@@ -23,6 +23,16 @@ export const resolveDashboardBin = (): string | null => {
   return found ? found : null
 }
 
+const SINGLE_LINE = /^[^\n\r\u2028\u2029]+$/
+
+// argv for a flag whose value is free text. Stricli reads a separate value token as a flag when it
+// matches FLAG_NAME_VALUE_PATTERN, ALIAS_VALUE_PATTERN, FLAG_SHORTHAND_PATTERN or FLAG_NAME_PATTERN,
+// so a value like `--help` must travel inside one `--flag=value` token. FLAG_NAME_VALUE_PATTERN only
+// reads that form when the value is non-empty and has no line terminator; any other value would land
+// as a stray positional, and no pattern can match such a value as its own token, so it goes separate.
+export const flagValueArgs = (flag: string, value: string): string[] =>
+  SINGLE_LINE.test(value) ? [`${flag}=${value}`] : [flag, value]
+
 // Availability-gated, loud on error. Returns stdout on success, null when unavailable.
 // On an available-but-failing call (including timeout): writes stderr + requests non-zero exit.
 // Resolves the binary itself on every call — fine for callers that only need one outcome

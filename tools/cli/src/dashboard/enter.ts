@@ -1,5 +1,5 @@
 import { markWorkflowEntered } from '../workflow-state/state.ts'
-import { dashboardAvailable, invokeDashboard } from './invoke.ts'
+import { dashboardAvailable, flagValueArgs, invokeDashboard } from './invoke.ts'
 import { resolveRawSessionId, tryResolveRawSessionId } from './session-id.ts'
 import { loadState, refuseCorruptState, saveState, stateFileIsCorrupt } from './state.ts'
 import { reproducesDeclarationGrammar } from './item.ts'
@@ -57,9 +57,9 @@ export class DashboardEnterRefusal extends Error {}
  * the CLI adjudicate this (FLOW-125, FLOW-123, FLOW-180) each shipped a rule the next round of
  * defects walked around.
  *
- * `workflowEntry: false` (used only by `item add`'s automatic conversation node) skips the workflow
- * marker and records no local title, so `assertNotSilentRetitle` fails open on the node and the
- * first workflow enter can name it without `--retitle`.
+ * `workflowEntry: false` (used by `item add`'s automatic conversation node and by `launch-title`'s
+ * root) skips the workflow marker and records no local title, so `assertNotSilentRetitle` fails
+ * open on the node and the first workflow enter can name it without `--retitle`.
  */
 export const runEnter = (
   key: string | undefined,
@@ -176,7 +176,7 @@ export const runEnter = (
     '--phase',
     phase,
   ]
-  if (title_ !== undefined) args.push('--title', title_)
+  if (title_ !== undefined) args.push(...flagValueArgs('--title', title_))
   if (parentExternalId !== undefined) args.push('--parent-external-id', parentExternalId)
   const out = invokeDashboard(args)
   if (out === null) return // available-but-failed surfaced loudly; leave pointer/state intact

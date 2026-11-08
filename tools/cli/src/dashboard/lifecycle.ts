@@ -6,7 +6,12 @@ import {
   resolveRawSessionId,
   tryResolveRawSessionId,
 } from './session-id.ts'
-import { dashboardAvailable, invokeDashboard, resolveDashboardBin } from './invoke.ts'
+import {
+  dashboardAvailable,
+  flagValueArgs,
+  invokeDashboard,
+  resolveDashboardBin,
+} from './invoke.ts'
 import { loadState, stateFileIsCorrupt, refuseCorruptState } from './state.ts'
 import {
   loadRegistry,
@@ -489,10 +494,8 @@ export const runLinkAdd = (
     sessionId,
     '--kind',
     kind,
-    '--label',
-    label,
-    '--url',
-    url,
+    ...flagValueArgs('--label', label),
+    ...flagValueArgs('--url', url),
   ])
 }
 

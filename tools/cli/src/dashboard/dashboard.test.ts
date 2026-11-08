@@ -500,7 +500,7 @@ test('link add passes --session --kind --label --url to link add', () => {
   assert.ok(calls[0]!.includes('--session'), 'includes --session flag')
   assert.ok(calls[0]!.includes(sessionId), 'includes session id')
   assert.ok(calls[0]!.includes('--kind ticket'), 'includes --kind ticket')
-  assert.ok(calls[0]!.includes('--label FLOW-100'), 'includes --label')
+  assert.ok(calls[0]!.includes('--label=FLOW-100'), 'includes --label')
   assert.ok(calls[0]!.includes('--url'), 'includes --url flag')
 })
 
@@ -535,7 +535,7 @@ test('link add: --root resolves to the root even when a PR-level child exists (d
   assert.equal(calls.length, 1, 'one call')
   assert.equal(
     calls[0],
-    'link add --session root-node-id --kind ticket --label FLOW-100 --url https://jira.example.com/FLOW-100',
+    'link add --session root-node-id --kind ticket --label=FLOW-100 --url=https://jira.example.com/FLOW-100',
     'exact argv: targets the root by its own id, not the branch child'
   )
   assert.ok(!calls[0]!.includes('branch-child'), 'never names the branch child')

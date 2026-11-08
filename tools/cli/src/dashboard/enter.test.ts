@@ -315,7 +315,7 @@ test('runEnter: with a parent, registers with --parent-external-id, points raw a
   assert.ok(calls[0]!.includes('session register'), 'calls session register')
   assert.ok(calls[0]!.includes('--system-id claude-workflow'), 'includes --system-id')
   assert.ok(calls[0]!.includes(`--external-id ${externalId}`), 'includes --external-id <raw>:<key>')
-  assert.ok(calls[0]!.includes('--title My Story'), 'includes --title')
+  assert.ok(calls[0]!.includes('--title=My Story'), 'includes --title')
   assert.ok(calls[0]!.includes('--phase implementation'), 'includes --phase')
   assert.ok(
     calls[0]!.includes(`--parent-external-id ${parentExternalId}`),
@@ -409,7 +409,7 @@ test('runEnter: no key — this IS the root (external-id = rawId, parentId null)
     !calls[0]!.includes('--parent-external-id'),
     'no --parent-external-id flag for the root'
   )
-  assert.ok(calls[0]!.includes('--title My Root Title'), 'includes --title')
+  assert.ok(calls[0]!.includes('--title=My Root Title'), 'includes --title')
 
   const node = registryNode(rawId, nodeId)
   assert.ok(node, "registry contains the root's minted id")
@@ -442,7 +442,7 @@ test('runEnter: root with no key and no title omits --title (never sends the raw
     !calls[0]!.includes('--title'),
     'no --title flag — backend preserves the existing title'
   )
-  assert.ok(!calls[0]!.includes('--title ' + rawId), 'rawId is never passed as a --title value')
+  assert.ok(!calls[0]!.includes('--title=' + rawId), 'rawId is never passed as a --title value')
   assert.ok(registryNode(rawId, nodeId), "registry still contains the root's minted id")
   assert.ok(loadState(nodeId), 'root state still written')
 
@@ -962,7 +962,7 @@ test('enter: --retitle allows the rename and forwards the new title', () => {
 
   const calls = readCalls(tmpDir)
   assert.equal(calls.length, 2, 'both calls reached the board')
-  assert.ok(calls[1]!.includes('--title some-new-title'), 'second call forwards the new title')
+  assert.ok(calls[1]!.includes('--title=some-new-title'), 'second call forwards the new title')
   // A phase re-enter with --retitle is a second keyless enter — it must reuse the existing root,
   // not register a second, orphaned one.
   assert.equal(loadRegistry(rawId).length, 1, 're-enter reuses the root, it does not add a second')
@@ -1473,5 +1473,5 @@ test('runEnter: a conversation node can be named by the first workflow enter wit
 
   const registers = readCalls(tmpDir).filter((c) => c.startsWith('session register'))
   assert.equal(registers.length, 2)
-  assert.ok(registers[1]!.includes('--title Real title'))
+  assert.ok(registers[1]!.includes('--title=Real title'))
 })
