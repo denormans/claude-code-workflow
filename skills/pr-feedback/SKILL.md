@@ -50,16 +50,19 @@ dashboard session enter --phase pr-feedback --key "<branch-name>" --title "<repo
 Fetch **unresolved inline review threads** using GitHub's GraphQL API:
 
 ```bash
-gh api graphql -f query='
-  query($owner: String!, $repo: String!, $pr: Int!) {
+gh api graphql --paginate -f query='
+  query($owner: String!, $repo: String!, $pr: Int!, $endCursor: String) {
     repository(owner: $owner, name: $repo) {
       pullRequest(number: $pr) {
-        reviewThreads(first: 100) {
+        reviewThreads(first: 100, after: $endCursor) {
+          pageInfo { hasNextPage endCursor }
           nodes {
+            id
             isResolved
             path
             line
             comments(first: 50) {
+              totalCount
               nodes {
                 author { login }
                 body
@@ -75,6 +78,24 @@ gh api graphql -f query='
 ```
 
 Only process threads where `isResolved` is `false`.
+
+A thread whose `comments.totalCount` is above the number of comments returned is not fully read.
+Fetch all of its comments before acting on it:
+
+```bash
+gh api graphql --paginate -f query='
+  query($id: ID!, $endCursor: String) {
+    node(id: $id) {
+      ... on PullRequestReviewThread {
+        comments(first: 100, after: $endCursor) {
+          pageInfo { hasNextPage endCursor }
+          nodes { author { login } body createdAt }
+        }
+      }
+    }
+  }
+' -F id='<thread-id>'
+```
 
 **Why GraphQL:** The REST endpoint returns all comments without resolution status. GraphQL's `reviewThreads` includes `isResolved`.
 
@@ -218,11 +239,12 @@ FOR each unresolved comment:
 Test each fix individually. Verify no regressions.
 
 **A round that declines everything is a ready signal.** When a round ends with every remaining
-finding pushed back on in its thread and no commit made, no bot will re-review — nothing was
-pushed — so no wake will ever say the bots are done. Hand back to PR Lifecycle's **Bots satisfied**
-check (`skills/pr-lifecycle/SKILL.md` step 9) as case (b) rather than waiting for a wake. A bot
-all-clear that arrives on its own — "No actionable comments", "no issues" — carries
-no findings: record nothing on the ledger for it and hand back to the same check as case (a).
+finding pushed back on in its thread, fully declined bot threads resolved (§Responding to Comments),
+and no commit made, no bot will re-review — nothing was pushed — so no wake will ever say the bots
+are done. Hand back to PR Lifecycle's **Bots satisfied** check (`skills/pr-lifecycle/SKILL.md`
+step 9) as case (b) rather than waiting for a wake. A bot all-clear that arrives on its own — "No
+actionable comments", "no issues" — carries no findings: record nothing on the ledger for it and
+hand back to the same check as case (a).
 
 ## Responding to Comments
 
@@ -238,6 +260,26 @@ no findings: record nothing on the ledger for it and hand back to the same check
 ✅ Use technical reasoning, reference working code/tests
 ✅ Ask specific questions if you're not sure
 ```
+
+**Resolve a bot's thread once you have declined every finding in it.** When you have declined, with
+a pushback reply, each finding the bot raised in a thread CodeRabbit or another bot opened, resolve
+that thread, using the `id` the fetch above returned for it. A thread the PR Lifecycle **Bots
+satisfied** check reopened is resolved the same way once you have declined everything the
+reopening replies raised:
+
+```bash
+gh api graphql -f query='
+  mutation($threadId: ID!) {
+    resolveReviewThread(input: {threadId: $threadId}) {
+      thread { isResolved }
+    }
+  }
+' -F threadId='<thread-id>'
+```
+
+A declined comment left unresolved still reads as open feedback on the PR, and `MERGE_READY`
+requires no unresolved threads. Leave a thread a human opened unresolved: closing it is that reviewer's
+call. A thread you fixed is left as it is too, since the commit is the response.
 
 **NEVER say:**
 - "You're absolutely right!"

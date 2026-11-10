@@ -614,13 +614,101 @@ description: After senior review, create a draft PR, watch the PR, handle review
      comments: re-read each named bot's top-level comments in full (`gh pr view "<pr-number>" --repo
      "<owner/repo>" --json comments`) and judge the **current** body. Findings → handle as
      `NEW_BOT_COMMENTS` above. A plain-language all-clear ("No actionable comments were generated in
-     the recent review", "no issues") → the **Bots satisfied** check below. Neither — a status-only
-     rewrite such as "Review skipped" or review-allowance text — needs nothing; the PR stays watched.
+     the recent review", "no issues"), or CodeRabbit's answer to a post the **Bots satisfied**
+     check's first step made or the rate-limit handler resent → that check below. Neither — a
+     status-only rewrite such as "Review skipped" or review-allowance text — needs nothing; the
+     PR stays watched.
    - **Bots satisfied — request a human review.** Not a monitor event: a check you run in two
-     places. **(a)** after reading an all-clear from any bot wake (`NEW_BOT_COMMENTS`,
+     places. **(a)** after reading an all-clear, or CodeRabbit's answer to a post this check's
+     first step made or the rate-limit handler resent, from any bot wake (`NEW_BOT_COMMENTS`,
      `bot-comments-edited`, or a bot-authored `new-main-comments`); **(b)** at the end of a PR
      Feedback round that declined every remaining finding and pushed no commit — nothing was
-     pushed, so no bot will re-review and no wake is coming. Post the item only when all hold:
+     pushed, so no bot will re-review and no wake is coming. **First, ask CodeRabbit to approve.**
+     Run this step each time the check runs and each time its wake-up fires. First, send any
+     CodeRabbit finding, and any CodeRabbit reply about a finding (to a fix, a decline, a
+     clarification question or this check's reply in a fixed thread) other than one agreeing
+     that the fix holds or the decline stands, that PR Feedback has not yet handled, on this
+     head or an earlier one, through the PR Feedback skill. An answer to a re-request or to
+     the approval request that raises no finding and disputes no fix is not one. One already
+     sent whose round has not ended is not sent again, and a round that ended by asking
+     CodeRabbit for clarification, wherever it asked, counts as handled. A reply this
+     sends that sits in a thread already resolved reopens it: unresolve the thread with the
+     `unresolveReviewThread` GraphQL mutation before sending it, since PR Feedback reads only
+     unresolved threads. Once PR Feedback has declined everything the reopening replies
+     raised, it resolves the thread again, since every earlier finding in it was either
+     declined or accepted by CodeRabbit when it resolved the thread; a fix leaves the thread
+     for CodeRabbit. A thread whose new replies all agree the decline stands stays resolved.
+     A run that sends
+     one, or finds one still in its round, ends there, posts nothing, and keeps this check's
+     30-minute wake-up scheduled. Otherwise take the first case below that holds for the
+     current head. Read the review threads with the PR Feedback skill's §Fetching Comments
+     query; `gh pr view` returns none. Each post it makes goes once per head, and a thread
+     reply once per head per thread; a new push starts over, since CodeRabbit re-reviews the
+     new head. A post made on this head that CodeRabbit has not yet answered, and whose
+     wake-up has not yet fired, means wait for that wake-up, and do not post the item below
+     meanwhile. A case whose post was already made on this head ends the step for the head
+     instead, and the check continues below. A post the rate limit refused, and whose retry
+     the handler then skipped, was not made. Two repeats keep this check's 30-minute wake-up
+     scheduled. The item below is owed on this head until one posts on it, and owed again,
+     until one posts, from the event each re-posting rule names: for the Rejected answer, the
+     next all-clear or fully-declined round; for step 9, the question resolving; for the HOLD
+     rule, its cause clearing, including a cause that clears without a push, such as a
+     suspected regression that proves unfounded, in which case run this check then. While the
+     item is owed, every run of the check and every wake-up it schedules, whether either
+     repeat's or the one after a post, goes on to the item as the item's own conditions say.
+     While it is not, every run of the check on this head runs this step alone.
+     A re-request is in flight until CodeRabbit answers it or the wake-up scheduled for it
+     fires. While the not-reviewed case below holds, each firing with no re-request in flight
+     and no rate-limit retry pending resends the re-request, an exception to once per head
+     for the re-request only. Once the step has ended in its last case with an unresolved
+     review thread and the approval request not made on this head, or the handler has skipped
+     the request's retry for an open thread or an unhandled finding, each firing runs the
+     first step again. The first repeat stops once the not-reviewed case no longer holds, on
+     a new head, which starts the step over, and on the PR merging or closing; the second
+     stops on a new head, on CodeRabbit approving the head, on the request being made, and on
+     the PR merging or closing.
+     - A rate-limit refusal of a post this step made, while the handler still owes it a retry,
+       is a `CODERABBIT_RATE_LIMITED` occurrence, handled there: wait out the
+       `available in <N> minutes` it names, and the handler's step (3) picks the retry.
+     - CodeRabbit has approved the head — the command in the request case below prints more
+       than `0`: when every condition of the **MERGE_READY** handler below holds, the approval is
+       `MERGE_READY`'s and its merge item covers the human review, so this check posts nothing;
+       otherwise the step ends for the head and the check continues below.
+     - CodeRabbit has not reviewed the head — no `coderabbitai` review whose `commit.oid` is the
+       head and that is APPROVED or has a non-empty body (an empty-body COMMENTED review is only
+       its reply inside a thread), and no all-clear of its own that names the head's commit (its
+       summary comment names the last commit it reviewed, as `up to <short-sha>`): send the
+       re-request, as the rate-limit handler prescribes. Resolved threads alone do not show a
+       review of the head.
+     - A CodeRabbit thread whose findings you fixed is unresolved and has no reply from you on
+       this head: reply in each such thread (`addPullRequestReviewThreadReply`, which needs no
+       `--ack-comment`), mentioning `@coderabbitai`, saying the fix is on the current head and
+       asking it to check whether the finding is fixed and to resolve the thread if it agrees.
+       Never resolve a thread you fixed: CodeRabbit resolves those. Only a thread whose
+       findings were all declined is yours to resolve, and PR Feedback has already resolved it.
+     - No review thread on the PR is unresolved: run
+       `gh pr view "<pr-number>" --repo "<owner/repo>" --json reviews,headRefOid --jq '.headRefOid as $head | [.reviews[] | select(.author.login == "coderabbitai" and .state == "APPROVED" and .commit.oid == $head)] | length'`
+       and, when it prints `0`, post `@coderabbitai approve the PR if you don't have any more
+       feedback` and record it exactly as `CODERABBIT_RATE_LIMITED` step (3) below prescribes
+       for a re-request: the REST post, then `pr-monitor --ack-comment` with the `node_id` it
+       returns, never `gh pr comment`.
+     - Otherwise the step ends for the head and the check continues below. That covers a thread
+       still unresolved with nothing left to post in it — a human's or another bot's, or a
+       CodeRabbit thread you fixed that already has your reply on this head — a post that drew
+       no reply by its wake-up, and any answer to the request not named above, including the
+       reply that approval is disabled.
+
+     CodeRabbit's `approve` command skips approval while any review thread is unresolved, which
+     is why the request waits for every thread, and approves only when
+     `reviews.auto_approvals.enabled` is on in the repo's CodeRabbit config, which is off by
+     default; with it off, it replies that approval is disabled. After each post, and after
+     the rate-limit handler resends one, schedule a wake-up 30 minutes out, as the rate-limit
+     handler does: not every answer reaches the session as an event. A rate-limit refusal posted
+     while an older rate-limit banner still stands emits none, because `detectCoderabbitStatus`
+     reads the status as unchanged and `compareStates` emits `CODERABBIT_RATE_LIMITED` only on
+     a change. Like a re-request, the approval request and a thread reply are silent writes and
+     never a board question.
+     Post the item only when all hold:
      the PR is out of draft; required CI is green on the current head — if it is not yet green,
      also run `gh pr checks "<pr-number>" --repo "<owner/repo>" --required
      --watch` via `Bash` with `run_in_background: true`, `timeout: 2147483647` and a `description` such as `Wait for required CI on <owner/repo>#<pr-number> (exit → re-check bots-satisfied)` (`skills/workflow-guide/references/background-watchers.md`): the monitor emits nothing when CI turns
@@ -628,19 +716,30 @@ description: After senior review, create a draft PR, watch the PR, handle review
      an approval, a bot's included), so this watch's exit is the wake that re-runs this check; a
      failed check arrives as `CI_FAILURE` anyway, so on that exit there is nothing more to do; every
      bot reviewer that has commented on this PR has spoken since the last push and its latest word
-     is an all-clear — a bot still showing findings, or not yet re-reviewed after the push, means
-     wait (in case (b), a finding you pushed back on counts as spoken-to,
-     not outstanding); every unresolved thread is one you answered with a pushback; no such item is
-     already open for this head; and no merge item is already open for this PR — the race between an
-     already-approved PR's CI going green (`MERGE_READY`) and the watch above exiting can land
-     either order, and the merge item already covers getting a human review. It is an **advancement
+     is an all-clear, where CodeRabbit's answer to a post this check's first step made or the
+     rate-limit handler resent is not its word unless it is a review of the head or an
+     all-clear naming the head's commit — a bot still showing findings, or not yet
+     re-reviewed after the push, means wait (in case (b), a finding you pushed back on counts
+     as spoken-to, not outstanding);
+     nothing the step's routing sentence (the one beginning "First, send any CodeRabbit
+     finding") sends to PR Feedback remains unhandled;
+     every unresolved thread is a human reviewer's that you answered with a pushback, or a
+     bot's in which you fixed or declined every finding (a bot thread whose findings
+     you all declined is resolved: the PR Feedback skill's §Responding to Comments);
+     no such item is already open for this head; and no merge item is already open for
+     this PR — the race between an already-approved PR's CI going green (`MERGE_READY`) and the
+     watch above exiting can land either order, and the merge item already covers getting a human
+     review. It is an **advancement
      approval** — plain `--type approval`, never `--approval-kind` — so the deferred-queue flush and
      open-question precondition from `CI_GREEN_ON_DRAFT` above apply to it unchanged, with the same
      targeting. Same temp-file
      discipline: write `<rich markdown: TICKET-ID + PR link + head sha + which bots cleared it, or
-     which findings were declined and the one-line reason for each + "bots are done — request a
-     teammate's review">` to `<tmpfile>` — the ticket, the link, why it is ready, and the ask,
-     nothing else — then `dashboard item add --type approval --prompt "$(cat "<tmpfile>")"`, then
+     which findings were declined and the one-line reason for each + only when one exists,
+     each CodeRabbit thread still unresolved with the fix it is waiting on, which blocks
+     `MERGE_READY` until CodeRabbit resolves it, and otherwise nothing, never "None" + "bots
+     are done — request a teammate's review">` to `<tmpfile>` — the ticket, the link, why it
+     is ready, the open threads when there are any, and the ask, nothing else — then
+     `dashboard item add --type approval --prompt "$(cat "<tmpfile>")"`, then
      `rm -f "<tmpfile>"` → capture `<id>`. With no board there is no `<id>`: `item add` exits 3 and prints the approval, so ask it in the terminal, treat the user's terminal reply as the answer, and skip the id-based board steps (`consume`, `withdraw`, remembering the id). **Approved** means the user is getting a human review: run `(cd "<worktree-path>" && workflow-hooks run --moment pr-human-review.after --ticket "<TICKET-ID>" --pr "<github-pr-url>")` per `skills/workflow-guide/references/stage-hooks.md`, then
      `dashboard item consume --item "<id>"` and wait — the review arrives as
      `NEW_THREADS`, `new-main-comments`, or `MERGE_READY`. **Rejected** means something still needs
@@ -664,7 +763,7 @@ description: After senior review, create a draft PR, watch the PR, handle review
      | `NEW_BOT_COMMENTS`, `bot-comments-edited`, `CODERABBIT_RATE_LIMITED`, `CODERABBIT_PAUSED` | no | A bot's own output; the lead's re-request prompts it, the content is new. |
      | `monitor-wedged` | no | Reports the monitor's own fetch failures. |
    - **MERGE_READY:** All checks passed and approved. **This handler ends in a `--type approval` merge item, never an info note**, and it runs whenever you find the PR out of draft with at least one CI check reported, every reported check green or skipped and the check list read successfully, at least one reviewer's latest decision `APPROVED` and none `CHANGES_REQUESTED`, no unresolved threads with the thread list read successfully, and a clean merge state, whether this event, your own CI watch or a re-read of the PR told you so. A green draft goes to `CI_GREEN_ON_DRAFT` instead. A ready-to-merge note already on the board does not count: withdraw it (`dashboard item withdraw --item "<id>"`) and post the merge item below in its place. Move the ticket to review first if it is not there yet (§Moving the Ticket to Review below) — a draft flipped straight to approved-and-green reaches this event without a `READY_FOR_REVIEW`. **With a board, flush the deferred queue first, the same as `CI_GREEN_ON_DRAFT` above — including the same `--key`/`--session` targeting when step 1's Additional block ran:** `dashboard item list-deferred` (`--key`/`--session` per that targeting) — review what is queued, drop what the work itself already answered (`dashboard item drop-deferred --id "<id>" --reason "<what answered it>"`, same targeting), then `dashboard item flush-deferred --context "<pr url>"` (same targeting) if anything remains — it posts every queued question as its own item — wait for all of them to be answered and consumed, then confirm list-deferred reports an empty queue; a flush that failed part-way leaves the rest queued and says so — flush again. Same scoping caveat as `CI_GREEN_ON_DRAFT` above: `approvalIsAllowed` guards only the node the merge item below actually targets — this ticket-node drain's remainder is mechanically caught only in the single-PR case; when step 1's Additional block ran, the merge item targets the PR child instead, and this drain's remainder is enforced by the loop alone, not by any CLI guard. This is not redundant with `CI_GREEN_ON_DRAFT`'s flush — `READY_FOR_REVIEW` reaches this event without ever routing through `CI_GREEN_ON_DRAFT`, and the CLI's own deferred-queue guard (`skills/board/references/dashboard-protocol.md` §3.1, *the deferred-queue half of this guard*) refuses the merge item outright over any question left in the local queue; when the queue is genuinely empty, `list-deferred` prints `[]` and there is nothing further to do. When step 1's Additional block ran, drain the PR child's own queue too, the same way and with the same `--key "<branch-name>"` targeting (with no ticket, `--key "<branch-name>-<repo-name>"`) as `CI_GREEN_ON_DRAFT` above — a remainder left there **is** caught by `approvalIsAllowed`, since the PR child is the node the merge item below targets in that branch. The single-PR case has no such child and nothing here changes for it. The flush comes **before** the merge item, not beside it — post the merge item only once both queues (or the one queue, single-PR case) are fully flushed, answered and consumed. Look up approvers first, filtered to the CURRENT head (same stale-state class as the CodeRabbit re-request precondition above — a review is only meaningful against the commit it actually reviewed): `gh pr view "<pr-number>" --repo "<owner/repo>" --json reviews,headRefOid --jq '.headRefOid as $head | [.reviews[] | select(.state == "APPROVED" and .commit.oid == $head) | .author.login] | unique | join(", ")'`. Bot approvers are included deliberately — the merge gate lists every approver at the current head. **Precondition — check the board before posting** (`dashboard session status --json` — find the entry in `boardNodes[]` whose `id` equals `localActiveSessionId`, and read that entry's `openItemCounts.question`; trust that field over the local ledger, which is known to drift, FLOW-196 — this field reports posted questions only, never the deferred queue the flush step above already settled. When step 1's Additional block ran, `localActiveSessionId` names the PR child, not the ticket node — the same widening as `CI_GREEN_ON_DRAFT` above: also find the ticket node's own entry in `boardNodes[]` the same way `CI_GREEN_ON_DRAFT` derives it (the flush's own resolved id in the empty-key branch; otherwise whichever `boardNodes[]` entry's `id` equals the PR child's `parentId`, or whose `externalId` ends `:$TICKET_NODE_KEY`) and read its `openItemCounts.question`, and treat either node's non-zero count as blocking. The single-PR case has only the ticket node, and `localActiveSessionId` already names it — nothing here changes for it. If `localActiveSessionId` is null (0 or more than one live leaf — not the shape this step expects) or `openItemCounts` is absent because the installed backend predates REV-72, the match can't be made — fall back to the §3.1 prose rule as the only gate): any open posted question on either checked node blocks the merge item — a question about the advancing PR's own content, scope, or review findings is always entangled with no judgement call; for any other open posted question, the entanglement judgement (`skills/board/references/dashboard-protocol.md` §3.1) decides whether you should have posted this approval in the first place — once a question is open, the guard blocks regardless of that judgement. This widens what counts as open; it does not move where the approval posts — the merge item's `item add --type approval` call below still resolves keylessly to the PR child once step 1's Additional block has run, correctly, for the same reason as `CI_GREEN_ON_DRAFT` above. Do **not** post the merge item while one of those is open — post it once every entangled question resolves and the PR is still merge-ready. If a Bots-satisfied item for this PR is still open, `dashboard item withdraw --item "<id>"` — the merge item supersedes it. If the flip-to-ready item is still open (the user flipped the PR in GitHub and it was already approved and green), withdraw it the same way and run `playtest stop --name "<branch-name>-<repo-name>"`. **Dashboard — once no such question is open, post FIRST, board-primary:** same temp-file discipline as `CI_GREEN_ON_DRAFT`'s Dashboard step above — write `<rich markdown: TICKET-ID + PR link + approver names + "ready to merge — approved and all checks green">` to `<tmpfile>` — that prompt is the ticket, the link, the approver names and the ask, nothing else: a sentence naming whose call the merge is, or explaining what a bot-only approval implies, is the padding `skills/board/references/escalation-contract.md` §Required question form forbids — then `dashboard item add --type approval --prompt "$(cat "<tmpfile>")"`, then `rm -f "<tmpfile>"` → capture `<id>` (remember it for `MERGED`; the open item is the sole notification channel). With no board there is no `<id>`: `item add` exits 3 and prints the approval, so ask it in the terminal, treat the user's terminal reply as the answer, and skip the id-based board steps (`consume`, `withdraw`, remembering the id). On approval: merge with the repo's configured method (e.g. `gh pr merge "<pr-number>" --repo "<owner/repo>" --squash --delete-branch`) — append `--delete-branch`, or record why not for a repo where the branch must survive the merge. What that method produces is not a question for the user (`skills/board/references/escalation-contract.md` §The repo's merge method is not a question). Then `dashboard item consume --item "<id>"` — the HOLD rule still applies: if any issue surfaced since the ready signal, post a HOLD board item instead of merging. On the user merging directly in GitHub: the `MERGED` event below resolves the item.
-   - **CODERABBIT_RATE_LIMITED:** CodeRabbit hit its rate limit. Carries a retry-after timestamp and an `occurrence` count. The count is information only and never changes what you do (rationale: `references/pr-lifecycle-reference.md` §Event Handler Rationale). **Never ask the user whether to skip, stop or keep re-requesting a CodeRabbit review, and never offer skipping it as an option: the answer is always to keep re-requesting.** On every occurrence, however many there have been: **(1)** Before ANY re-request: `gh pr view "<pr-number>" --repo "<owner/repo>" --json reviews,headRefOid` — an APPROVED review on the current head means the review already completed; skip the re-request entirely (3 live reproductions: FLOW-133, FLOW-149 ×2). **(2)** Wait until retry-after (schedule a wake-up). If "cooloff unknown", wait a fixed fallback of 30 minutes. **(3)** Re-request, regardless of any open flip-to-ready gate. Pick the command from the `reviews` that step (1) returned: when none is authored by `coderabbitai`, send `@coderabbitai full review`; otherwise send `@coderabbitai review`. This is the only rule that picks the command, and every other site defers to it. Post the picked command as a conversation comment and record the id it returns on the same turn, exactly as the PR Feedback skill's §Record a comment the monitor would otherwise wake you on prescribes: `gh api "repos/<owner/repo>/issues/<pr-number>/comments" -f body="<the command>"`, then `pr-monitor --ack-comment "<node_id-from-response>" --pr "<pr-number>" --repo "<owner/repo>"` with the `node_id` that response carries. Not `gh pr comment`: the REST post above is what hands you the `node_id` to record, and an unrecorded conversation comment wakes you on your own words as `new-main-comments` — the agent and the human share one GitHub account, so the author on your re-request is that human reviewer's own. **(4)** The PR stays watched. Only one re-request may be in flight. A duplicate `occurrence` (not advanced) = no new action. A throttle is never a reason to go quiet: until CodeRabbit's review lands on the head, a wake-up for the next re-request is always scheduled.
+   - **CODERABBIT_RATE_LIMITED:** CodeRabbit hit its rate limit. Carries a retry-after timestamp and an `occurrence` count. The count is information only and never changes what you do (rationale: `references/pr-lifecycle-reference.md` §Event Handler Rationale). **Never ask the user whether to skip, stop or keep re-requesting a CodeRabbit review, and never offer skipping it as an option: the answer is always to keep re-requesting.** On every occurrence, however many there have been: **(1)** Before ANY re-request: `gh pr view "<pr-number>" --repo "<owner/repo>" --json reviews,headRefOid` — an APPROVED review on the current head means the review already completed; skip the re-request entirely (3 live reproductions: FLOW-133, FLOW-149 ×2). While the head is still the one they were posted for, the **Bots satisfied** check's own posts take their own skips instead: its approval request's retry is skipped by an APPROVED review by `coderabbitai` on the head, or by any review thread on the PR now being unresolved (read with the PR Feedback skill's §Fetching Comments query, since `gh pr view` returns no threads), or by anything the **Bots satisfied** routing sentence (the one beginning "First, send any CodeRabbit finding") sends to PR Feedback remaining unhandled, and its reply in a fixed thread only by that thread being resolved, never by an approval. An approval request's retry skipped for an unresolved thread or an unhandled finding schedules that check's 30-minute wake-up, which then repeats as the **Bots satisfied** check states. A review re-request that check sends, or a retry of one, is skipped only when CodeRabbit has reviewed the current head, never by a human's approval. That covers its not-reviewed case's re-request and the one step (3) sends in place of its post once the head has moved. Whether CodeRabbit has reviewed the head is the **Bots satisfied** check's not-reviewed case's test. **(2)** Wait until retry-after (schedule a wake-up). If "cooloff unknown", wait a fixed fallback of 30 minutes. When the wake-up fires, run step (1) again before step (3): its skips and step (3)'s pick use that fresh read of the head, the reviews and the threads, never the one taken before the wait. **(3)** Re-request, regardless of any open flip-to-ready gate. Pick the command from the `reviews` that this fresh step (1) returned: when none is authored by `coderabbitai`, send `@coderabbitai full review`; otherwise send `@coderabbitai review`, except `@coderabbitai full review` once a plain `@coderabbitai review` on the current head has drawn an answer that is neither a review of the head nor a rate-limit refusal, or once a `@coderabbitai full review` has been sent on the current head, while the **Bots satisfied** check's not-reviewed case still holds. When the refused comment was the **Bots satisfied** check's approval request and the head is still the one it was posted for, the command is that request again; when it was that check's reply in a fixed thread, the thread is still unresolved and the head is still the one it was posted for, the command is that reply again, posted into the same thread with `addPullRequestReviewThreadReply` and not as a conversation comment, so it needs no id recorded. This is the only rule that picks the command, and every other site defers to it. Post a picked command that is not the thread reply as a conversation comment and record the id it returns on the same turn, exactly as the PR Feedback skill's §Record a comment the monitor would otherwise wake you on prescribes: `gh api "repos/<owner/repo>/issues/<pr-number>/comments" -f body="<the command>"`, then `pr-monitor --ack-comment "<node_id-from-response>" --pr "<pr-number>" --repo "<owner/repo>"` with the `node_id` that response carries. Not `gh pr comment`: the REST post above is what hands you the `node_id` to record, and an unrecorded conversation comment wakes you on your own words as `new-main-comments` — the agent and the human share one GitHub account, so the author on your re-request is that human reviewer's own. **(4)** The PR stays watched. Only one re-request may be in flight, as the **Bots satisfied** check defines it. A duplicate `occurrence` (not advanced) = no new action. A throttle is never a reason to go quiet: until CodeRabbit has reviewed the head, as the **Bots satisfied** check's not-reviewed case decides, or until that check's first repeat stops, a wake-up for the next re-request is always scheduled.
    - **CODERABBIT_PAUSED:** Before ANY re-request: `gh pr view "<pr-number>" --repo "<owner/repo>" --json reviews,headRefOid` — an APPROVED review on the current head means the review already completed; skip the re-request entirely (3 live reproductions: FLOW-133, FLOW-149 ×2). CodeRabbit auto-paused because commits were still flowing in (rationale: `references/pr-lifecycle-reference.md` §Event Handler Rationale). **If an open dashboard question or approval could change this PR:** do nothing now — re-request as part of handling that item's resolution. **Otherwise:** once the current work round has settled (no further commits expected), re-request. Either way, pick the command and post and record the re-request exactly as `CODERABBIT_RATE_LIMITED` step (3) above prescribes — never `gh pr comment`.
    - **`monitor-wedged`:** `MAX_CONSECUTIVE_UNKNOWN` consecutive checks could not poll the PR, and it is **no longer watched**. **Nothing about the PR changed** — this is news about the observer, not about the PR: the last known state is as of the last *successful* poll, not now. This is dominated by persistent failures, not transient ones — the `detail` carries the last failure's reason (a failed `gh` read, a poll that threw, or a poll too slow for its time slice); read it for the cause. Fix the cause first — and if the cause needs a credential this session does not have, that is a credential ask (**Board Triggers** below) — then register the PR again with `pr-monitor --pr "<pr-number>" --repo "<owner/repo>"`; **that registration IS this event's handling.** The saved baseline survives the unwatch, so the first check after registering re-derives everything missed. Do **not** add a `gh pr view` re-check on top of it.
    - **`could not be polled`** — not a PR event: a `[pr-monitor] <owner/repo>#<pr> could not be polled: the check failed to record its result: <error>` line, printed on every check until the cause is fixed. The check could not write its poll result to the session's pr-monitor store, so it cannot count failures or advance the baseline for that PR. **Nothing about the PR changed.** **The PR is still watched** — registering again would write to the same broken store. Fix the store (the directory the line's error names: disk full, wrong permissions) and the PR resumes on the next check.

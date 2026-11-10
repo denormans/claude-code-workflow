@@ -1,6 +1,6 @@
 {
   "name": "claude-workflow",
-  "version": "1.108.0",
+  "version": "1.109.0",
   "private": true,
   "license": "GPL-3.0-or-later",
   "type": "module",
