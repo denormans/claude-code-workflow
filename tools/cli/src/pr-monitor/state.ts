@@ -25,6 +25,7 @@ import {
 export interface CiCheck {
   name: string
   state: string
+  link?: string
 }
 
 export interface ReviewThread {
@@ -41,6 +42,8 @@ export interface Review {
   authorType: string // 'User' | 'Bot' | 'Mannequin' | 'Organization' | 'Unknown'
   state: string
   body?: string
+  // The commit the review was left on. Absent on state saved before the field existed.
+  commitId?: string
 }
 
 export interface BotComment {
@@ -53,6 +56,43 @@ export interface BotComment {
 export interface MainComment {
   id: string
   author: string
+}
+
+export interface ThreadComments {
+  firstCommentId: string
+  path: string
+  replyIds: string[]
+}
+
+export interface CheckRun {
+  name: string
+  runId: string
+}
+
+// A re-run keeps its run id and increments `attempt`; 0 marks a saved entry with no attempt.
+export interface StuckCheck extends CheckRun {
+  attempt: number
+}
+
+// `updatedAt` is the comment's own last edit: the stated time runs from it, not from when this
+// monitor first saw the comment.
+export interface StatedReviewerWait {
+  commentId: string
+  updatedAt: string
+  seconds: number
+}
+
+// A refusal comment at one edit: a new comment id or a new `updatedAt` is a new refusal.
+export interface RefusalIdentity {
+  commentId: string
+  updatedAt: string
+}
+
+export interface ReviewerWait {
+  commentId: string
+  updatedAt: string
+  availableAt: string
+  fired: boolean
 }
 
 export type CoderabbitStatus = 'none' | 'rate-limited' | 'paused'
@@ -79,6 +119,33 @@ export interface PrState {
   botComments: BotComment[]
   mainComments: MainComment[]
   ciGreenOnDraftFired: boolean
+  // The head a ci-green-awaiting-review event already fired for.
+  ciGreenAwaitingReviewHead?: string
+  threadComments?: ThreadComments[]
+  // The head a stale-review-blocking event already fired for.
+  staleReviewHead?: string
+  // Checks still in progress although their workflow run has completed.
+  stuckChecks?: StuckCheck[]
+  // In-progress Actions checks whose run status could not be read this poll; their previous
+  // stuck state is kept rather than reset.
+  unreadRunChecks?: CheckRun[]
+  // The reset time the newest CodeRabbit rate-limit comment states, as read this poll.
+  statedReviewerWait?: StatedReviewerWait
+  // The newest rate-limit comment when it states no time. Null when the read found none to report
+  // (no refusal, or one that states a time); undefined when nothing was read, which is also how a
+  // first poll or a state saved before this field reads.
+  untimedRefusal?: RefusalIdentity | null
+  // True when the comments could not be read this poll, so the previous wait is kept.
+  reviewerWaitReadFailed?: boolean
+  // Taken just before the comments were read this poll; set by fetchPrState and cleared by
+  // compareStates once it moves `reviewerWaitReadAt` to it, so it is never saved.
+  commentsReadStartedAt?: string
+  // The time no later than the last successful comment read: a wait not visible to that read and
+  // due after it fires. A poll whose read failed keeps the earlier value. A state saved before
+  // this field existed has only `timestamp`, which stands in for it.
+  reviewerWaitReadAt?: string
+  // The stated reset time as a clock time, and whether reviewer-available already fired for it.
+  reviewerWait?: ReviewerWait
   timestamp: string
   // Why prState is UNKNOWN; set by fetchPrState only on that path and never persisted.
   unknownReason?: string
@@ -100,6 +167,11 @@ export type ChangeType =
   | 'new-main-comments'
   | 'monitor-wedged'
   | 'bot-comments-edited'
+  | 'ci-green-awaiting-review'
+  | 'new-thread-replies'
+  | 'stale-review-blocking'
+  | 'check-stuck'
+  | 'reviewer-available'
 
 export interface StateChange {
   type: ChangeType
@@ -227,7 +299,17 @@ const normalizeState = (raw: Partial<PrState>): PrState => {
       author: r.author ?? 'unknown',
       authorType: r.authorType ?? 'Unknown',
       state: r.state ?? 'PENDING',
+      ...(typeof r.commitId === 'string' && r.commitId ? { commitId: r.commitId } : {}),
     })),
+    staleReviewHead: typeof raw.staleReviewHead === 'string' ? raw.staleReviewHead : undefined,
+    reviewerWait: normalizeReviewerWait(raw.reviewerWait),
+    untimedRefusal: normalizeUntimedRefusal(raw.untimedRefusal),
+    reviewerWaitReadAt:
+      typeof raw.reviewerWaitReadAt === 'string' &&
+      Number.isFinite(Date.parse(raw.reviewerWaitReadAt))
+        ? raw.reviewerWaitReadAt
+        : undefined,
+    stuckChecks: normalizeStuckChecks(raw.stuckChecks),
     coderabbitSkipped: booleanOr(raw.coderabbitSkipped, false),
     coderabbitStatus: raw.coderabbitStatus ?? 'none',
     coderabbitCooloffMinutes: raw.coderabbitCooloffMinutes ?? null,
@@ -238,8 +320,83 @@ const normalizeState = (raw: Partial<PrState>): PrState => {
     botComments: objectArray<BotComment>(raw.botComments) ?? [],
     mainComments: objectArray<MainComment>(raw.mainComments) ?? [],
     ciGreenOnDraftFired: booleanOr(raw.ciGreenOnDraftFired, false),
+    ciGreenAwaitingReviewHead:
+      typeof raw.ciGreenAwaitingReviewHead === 'string' ? raw.ciGreenAwaitingReviewHead : undefined,
+    threadComments: normalizeThreadComments(raw.threadComments),
     timestamp: raw.timestamp ?? new Date().toISOString(),
   }
+}
+
+const normalizeUntimedRefusal = (value: unknown): RefusalIdentity | null | undefined => {
+  if (value === null) {
+    return null
+  }
+
+  const refusal = value as Partial<RefusalIdentity> | undefined
+  return typeof refusal?.commentId === 'string' && typeof refusal.updatedAt === 'string'
+    ? { commentId: refusal.commentId, updatedAt: refusal.updatedAt }
+    : undefined
+}
+
+// A wait saved by the version that identified it by body hash has no comment id and reads as absent.
+const normalizeReviewerWait = (value: unknown): ReviewerWait | undefined => {
+  const wait = value as Partial<ReviewerWait> | null | undefined
+  return typeof wait?.commentId === 'string' &&
+    typeof wait.updatedAt === 'string' &&
+    typeof wait.availableAt === 'string' &&
+    Number.isFinite(Date.parse(wait.availableAt)) &&
+    typeof wait.fired === 'boolean'
+    ? {
+        commentId: wait.commentId,
+        updatedAt: wait.updatedAt,
+        availableAt: wait.availableAt,
+        fired: wait.fired,
+      }
+    : undefined
+}
+
+// Earlier versions stored bare check names, then name and run id; a missing part reads as unknown.
+const normalizeStuckChecks = (value: unknown): StuckCheck[] | undefined => {
+  if (!Array.isArray(value)) {
+    return undefined
+  }
+
+  return value.flatMap((entry): StuckCheck[] => {
+    if (typeof entry === 'string') {
+      return [{ name: entry, runId: '', attempt: 0 }]
+    }
+
+    const check = entry as Partial<StuckCheck> | null
+    return typeof check?.name === 'string'
+      ? [
+          {
+            name: check.name,
+            runId: stringOr(check.runId, ''),
+            attempt: Number.isInteger(check.attempt) ? (check.attempt as number) : 0,
+          },
+        ]
+      : []
+  })
+}
+
+// Absent when the field is missing or wrong-shaped: compareStates reads that as "nothing known".
+const normalizeThreadComments = (value: unknown): ThreadComments[] | undefined => {
+  const entries = objectArray<Partial<ThreadComments>>(value)
+  if (!entries) {
+    return undefined
+  }
+
+  return entries.flatMap((t) =>
+    typeof t.firstCommentId === 'string' && Array.isArray(t.replyIds)
+      ? [
+          {
+            firstCommentId: t.firstCommentId,
+            path: stringOr(t.path, ''),
+            replyIds: t.replyIds.filter((id): id is string => typeof id === 'string'),
+          },
+        ]
+      : []
+  )
 }
 
 const booleanOr = (value: unknown, fallback: boolean): boolean =>
@@ -918,11 +1075,7 @@ const latestDecisionByAuthor = (reviews: Review[]): Review[] =>
   )
 
 const isMergeReady = (state: PrState): boolean => {
-  const checks = Object.values(state.ciChecks)
-  const allChecksGreen =
-    !(state.ciChecksFetchFailed ?? true) &&
-    checks.length > 0 &&
-    checks.every((s) => s === 'success' || s === 'skipped')
+  const allChecksGreen = hasAllChecksGreen(state)
   const decisionReviews = latestDecisionByAuthor(state.reviews ?? [])
   const approvals = decisionReviews.filter((r) => r.state === 'APPROVED')
   const changesRequested = decisionReviews.some((r) => r.state === 'CHANGES_REQUESTED')
@@ -939,12 +1092,181 @@ const isMergeReady = (state: PrState): boolean => {
   )
 }
 
-const isCiGreenOnDraft = (state: PrState): boolean => {
-  if (!state.isDraft) return false
+const isCiGreenOnDraft = (state: PrState): boolean => !!state.isDraft && hasAllChecksGreen(state)
+
+const hasAllChecksGreen = (state: PrState): boolean => {
   if (state.ciChecksFetchFailed ?? true) return false
   const checks = Object.values(state.ciChecks)
   return checks.length > 0 && checks.every((s) => s === 'success' || s === 'skipped')
 }
+
+const isBlockedOnlyByStaleReview = (state: PrState): boolean => {
+  if ((state.isDraft ?? true) || !hasAllChecksGreen(state) || !state.headSha) {
+    return false
+  }
+
+  if ((state.fetchFailed ?? true) || (state.unresolvedThreads ?? []).length > 0) {
+    return false
+  }
+
+  if ((state.mergeable ?? 'UNKNOWN') === 'CONFLICTING') {
+    return false
+  }
+
+  const blocking = latestDecisionByAuthor(state.reviews ?? []).filter(
+    (r) => r.state === 'CHANGES_REQUESTED'
+  )
+
+  return blocking.length > 0 && blocking.every((r) => !!r.commitId && r.commitId !== state.headSha)
+}
+
+const NO_RESET_STATED =
+  'no reset time stated — the handler waits on a stated time or a later comment'
+
+// Turns CodeRabbit's stated reset time into one reviewer-available event. A wait is identified by
+// its comment and that comment's last edit, so identical refusals each get their own wait and an
+// edit starts a new one. A wait first seen with its time already past at the previous successful
+// read is spent, so an old refusal never fires on a first poll or after an upgrade; one that falls
+// due after that read, including while the monitor was away, fires. A failed comment read keeps the
+// previous wait.
+const reconcileReviewerWait = (
+  previous: PrState,
+  current: PrState,
+  nowMs: number
+): ReviewerWaitOutcome => {
+  const lastGoodRead = previous.reviewerWaitReadAt ?? previous.timestamp
+  if (current.reviewerWaitReadFailed) {
+    current.reviewerWait = previous.reviewerWait
+    current.reviewerWaitReadAt = lastGoodRead
+    current.untimedRefusal = previous.untimedRefusal
+    delete current.commentsReadStartedAt
+    return { events: [], isNewUntimedRefusal: false }
+  }
+
+  current.reviewerWaitReadAt = current.commentsReadStartedAt ?? current.timestamp
+  delete current.commentsReadStartedAt
+  const untimed = current.untimedRefusal ?? null
+  current.untimedRefusal = untimed
+  const wasPending = !!previous.reviewerWait && !previous.reviewerWait.fired
+
+  const stated = current.statedReviewerWait
+  const updatedMs = Date.parse(stated?.updatedAt ?? '')
+  if (!stated || !Number.isFinite(updatedMs)) {
+    current.reviewerWait = undefined
+
+    return { events: [], isNewUntimedRefusal: isNewUntimedRefusal(previous, untimed, wasPending) }
+  }
+
+  const availableMs = updatedMs + stated.seconds * 1000
+  const seen = previous.reviewerWait
+  const isSeenBefore = seen?.commentId === stated.commentId && seen.updatedAt === stated.updatedAt
+  const isSpent = isSeenBefore ? seen.fired : !(availableMs > Date.parse(lastGoodRead))
+  const wait: ReviewerWait = {
+    commentId: stated.commentId,
+    updatedAt: stated.updatedAt,
+    availableAt: new Date(availableMs).toISOString(),
+    fired: isSpent,
+  }
+
+  if (isSpent || nowMs < availableMs) {
+    current.reviewerWait = wait
+    return { events: [], isNewUntimedRefusal: false }
+  }
+
+  current.reviewerWait = { ...wait, fired: true }
+
+  return {
+    events: [
+      {
+        type: 'reviewer-available',
+        detail: `CodeRabbit's stated reset time (${wait.availableAt}) has arrived`,
+      },
+    ],
+    isNewUntimedRefusal: false,
+  }
+}
+
+interface ReviewerWaitOutcome {
+  events: StateChange[]
+  isNewUntimedRefusal: boolean
+}
+
+// A refusal stating no time leaves nothing to wake the session, so each new one (a new comment, or
+// a new edit of one) is reported once. The same refusal read again is not. With no saved read, a
+// first poll or a state from before this was recorded, it is reported only when it replaces a wait
+// that was still pending.
+const isNewUntimedRefusal = (
+  previous: PrState,
+  untimed: RefusalIdentity | null,
+  wasPending: boolean
+): boolean => {
+  if (untimed === null) {
+    return false
+  }
+
+  const saved = previous.untimedRefusal
+  if (saved === undefined) {
+    return wasPending
+  }
+
+  return (
+    saved === null || saved.commentId !== untimed.commentId || saved.updatedAt !== untimed.updatedAt
+  )
+}
+
+// The reset time the event states is the reconciled wait's own, and only while a
+// reviewer-available for it is still to come; otherwise the handler has nothing to wait on.
+const rateLimitedDetail = (current: PrState, occurrence: number): string => {
+  const wait = current.reviewerWait
+  const cooloff =
+    wait && !wait.fired ? `next review available at ${wait.availableAt}` : NO_RESET_STATED
+
+  return `CodeRabbit rate-limited — ${cooloff}; occurrence ${occurrence}`
+}
+
+// A saved entry with no run id, or no attempt, predates that part of the identity and matches on
+// the rest.
+const isSameStuckCheck = (saved: StuckCheck, read: StuckCheck): boolean =>
+  saved.name === read.name &&
+  (saved.runId === '' ||
+    (saved.runId === read.runId && (saved.attempt === 0 || saved.attempt === read.attempt)))
+
+// A check is identified by name, run and attempt: a re-run that ends with the check still stuck is a
+// new attempt and reports again, while one that stays stuck on one attempt reports once. A check
+// whose run status could not be read keeps its previous stuck state, so one failed read neither
+// clears the baseline nor re-reports the check on the next good read.
+const reconcileStuckChecks = (
+  previous: PrState,
+  current: PrState,
+  headChanged: boolean
+): StateChange[] => {
+  const previousStuck = headChanged ? [] : (previous.stuckChecks ?? [])
+  const read = current.stuckChecks ?? []
+  const isUnread = (s: StuckCheck): boolean =>
+    !!current.ciChecksFetchFailed ||
+    (current.unreadRunChecks ?? []).some(
+      (u) => u.name === s.name && (s.runId === '' || s.runId === u.runId)
+    )
+  const kept = previousStuck.filter((s) => isUnread(s) && !read.some((r) => isSameStuckCheck(s, r)))
+  current.stuckChecks = [...read, ...kept]
+
+  const newlyStuck = read.filter((r) => !previousStuck.some((s) => isSameStuckCheck(s, r)))
+  if (newlyStuck.length === 0) {
+    return []
+  }
+
+  const named = newlyStuck.map((s) => `${s.name} (run ${s.runId}, attempt ${s.attempt})`).join(', ')
+
+  return [
+    {
+      type: 'check-stuck',
+      detail: `Check${newlyStuck.length > 1 ? 's' : ''} still in progress although the workflow run has completed: ${named}`,
+    },
+  ]
+}
+
+const isCiGreenAwaitingReview = (state: PrState): boolean =>
+  !(state.isDraft ?? true) && hasAllChecksGreen(state) && !isMergeReady(state)
 
 // --- Thread dedup helpers ---
 
@@ -977,12 +1299,13 @@ export const compareStates = (
   previous: PrState,
   current: PrState,
   selfCommentIds: readonly string[] = [],
-  selfReady = false
+  selfReady = false,
+  nowMs: number = Date.now()
 ): StateChange[] => {
   const changes: StateChange[] = []
 
   // A new commit (changed head SHA) is a fresh review cycle — used to re-arm
-  // per-commit signals (CI_GREEN_ON_DRAFT re-emit, CodeRabbit throttle reset).
+  // per-commit signals (stuck checks, CI_FAILURE and CI_GREEN_ON_DRAFT re-emit).
   const headChanged =
     !!current.headSha && !!previous.headSha && current.headSha !== previous.headSha
 
@@ -998,7 +1321,7 @@ export const compareStates = (
   }
 
   // Merge readiness (after MERGED/CLOSED, before CI/threads)
-  if (isMergeReady(current) && !isMergeReady(previous)) {
+  if (isMergeReady(current) && (!isMergeReady(previous) || headChanged)) {
     const head = current.headSha ? ` (head ${current.headSha.slice(0, 7)})` : ''
     changes.push({
       type: 'MERGE_READY',
@@ -1038,6 +1361,28 @@ export const compareStates = (
     })
   }
 
+  current.ciGreenAwaitingReviewHead = previous.ciGreenAwaitingReviewHead
+  if (
+    isCiGreenAwaitingReview(current) &&
+    !!current.headSha &&
+    previous.ciGreenAwaitingReviewHead !== current.headSha
+  ) {
+    current.ciGreenAwaitingReviewHead = current.headSha
+    changes.push({
+      type: 'ci-green-awaiting-review',
+      detail: `All checks green on ${current.headSha.slice(0, 7)} and the PR is not yet ready to merge`,
+    })
+  }
+
+  current.staleReviewHead = previous.staleReviewHead
+  if (isBlockedOnlyByStaleReview(current) && previous.staleReviewHead !== current.headSha) {
+    current.staleReviewHead = current.headSha
+    changes.push({
+      type: 'stale-review-blocking',
+      detail: `Checks are green and no thread is open, but a CHANGES_REQUESTED review is left on an older commit than ${current.headSha.slice(0, 7)}${current.mergeStateStatus === 'BEHIND' ? '; the branch is also behind its base' : ''}`,
+    })
+  }
+
   // Merge conflicts
   const prevMergeable = previous.mergeable ?? 'MERGEABLE'
   const currMergeable = current.mergeable ?? 'MERGEABLE'
@@ -1053,23 +1398,18 @@ export const compareStates = (
   }
 
   // CodeRabbit review-availability transitions (rate-limited / paused).
-  // Count is monitor-owned and resets on a new commit.
+  // The count is monitor-owned and only grows, so every event carries a number higher than the last.
   const prevCoderabbit = previous.coderabbitStatus ?? 'none'
   const currCoderabbit = current.coderabbitStatus ?? 'none'
   let throttleCount = previous.coderabbitThrottleCount ?? 0
-  if (headChanged) {
-    throttleCount = 0
-  }
+  const reviewerWait = reconcileReviewerWait(previous, current, nowMs)
+  let isRateLimitedEmitted = false
   if (currCoderabbit === 'rate-limited' && prevCoderabbit !== 'rate-limited') {
     throttleCount += 1
-    const mins = current.coderabbitCooloffMinutes
-    const cooloff =
-      mins != null
-        ? `next review in ~${mins}m (retry after ${new Date(Date.now() + mins * 60_000).toISOString()})`
-        : 'cooloff unknown — use fallback wait'
+    isRateLimitedEmitted = true
     changes.push({
       type: 'CODERABBIT_RATE_LIMITED',
-      detail: `CodeRabbit rate-limited — ${cooloff}; occurrence ${throttleCount}`,
+      detail: rateLimitedDetail(current, throttleCount),
     })
   }
   current.coderabbitThrottleCount = throttleCount
@@ -1080,16 +1420,28 @@ export const compareStates = (
     })
   }
 
+  changes.push(...reviewerWait.events)
+  if (reviewerWait.isNewUntimedRefusal && !isRateLimitedEmitted) {
+    throttleCount += 1
+    current.coderabbitThrottleCount = throttleCount
+    changes.push({
+      type: 'CODERABBIT_RATE_LIMITED',
+      detail: rateLimitedDetail(current, throttleCount),
+    })
+  }
+
   // CI failures
   for (const [name, currentStatus] of Object.entries(current.ciChecks)) {
     const previousStatus = previous.ciChecks[name] ?? 'pending'
-    if (currentStatus === 'failure' && previousStatus !== 'failure') {
+    if (currentStatus === 'failure' && (previousStatus !== 'failure' || headChanged)) {
       changes.push({
         type: 'CI_FAILURE',
         detail: `Check "${name}" failed (was: ${previousStatus})`,
       })
     }
   }
+
+  changes.push(...reconcileStuckChecks(previous, current, headChanged))
 
   // New unresolved review threads
   const selfIds = new Set(selfCommentIds)
@@ -1108,6 +1460,29 @@ export const compareStates = (
     changes.push({
       type: 'NEW_THREADS',
       detail: `${newThreads.length} new unresolved review thread${newThreads.length > 1 ? 's' : ''} in: ${paths}`,
+    })
+  }
+
+  const knownReplies = new Map(
+    (previous.threadComments ?? []).map((t) => [t.firstCommentId, new Set(t.replyIds)])
+  )
+  const repliedThreads = (current.threadComments ?? []).filter((t) => {
+    const known = knownReplies.get(t.firstCommentId)
+    if (!known) {
+      return false
+    }
+
+    // The list is a capped window in chronological order, so an id that slid in from before it
+    // precedes every known id and is not new: only an unknown id after the oldest known one is.
+    const oldestKnown = t.replyIds.findIndex((id) => known.has(id))
+
+    return t.replyIds.slice(oldestKnown + 1).some((id) => !known.has(id) && !selfIds.has(id))
+  })
+  if (repliedThreads.length > 0) {
+    const paths = [...new Set(repliedThreads.map((t) => t.path))].join(', ')
+    changes.push({
+      type: 'new-thread-replies',
+      detail: `New replies in ${repliedThreads.length} existing review thread${repliedThreads.length > 1 ? 's' : ''} in: ${paths}`,
     })
   }
 

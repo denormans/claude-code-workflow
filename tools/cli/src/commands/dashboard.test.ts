@@ -1055,6 +1055,99 @@ test('CLI: item add --type approval --approval-kind hold posts despite an open q
   )
 })
 
+test('CLI: item add --type approval --approval-kind launch posts despite an open question', () => {
+  registerRootNode(rawId)
+  const stubBin = writeBranchingStub(
+    tmpDir,
+    openQuestionBoardRow(rawId),
+    '{"itemId":"item-launch"}'
+  )
+
+  const { stdout, stderr, status } = runCli(
+    [
+      'dashboard',
+      'item',
+      'add',
+      '--type',
+      'approval',
+      '--prompt',
+      'p',
+      '--approval-kind',
+      'launch',
+    ],
+    { AI_WORKFLOW_APP_BIN: stubBin, CLAUDE_CODE_SESSION_ID: rawId }
+  )
+
+  assert.equal(status, 0, 'exits 0 with the launch override')
+  assert.equal(stdout, '{"itemId":"item-launch"}\n', 'the item was actually posted')
+  assert.equal(stderrBeyondNodeWarnings(stderr), '', 'nothing on stderr')
+  assert.ok(
+    readCalls(tmpDir).some((c) => c.includes('item add')),
+    'item add reached the stub'
+  )
+})
+
+test('CLI: item add --type approval --approval-kind launch posts despite a deferred question', () => {
+  registerRootNode(rawId)
+  const stubBin = writeBranchingStub(tmpDir, '[]', '{"itemId":"item-launch-deferred"}')
+  const deferred = runCli(
+    [
+      'dashboard',
+      'item',
+      'add',
+      '--type',
+      'question',
+      '--prompt',
+      'Should the retry live in the client or the caller?',
+      '--recommend',
+      'Ship it',
+      '--stalls',
+      'none',
+      '--why-mine',
+      'scope',
+      '--defer',
+    ],
+    { AI_WORKFLOW_APP_BIN: stubBin, CLAUDE_CODE_SESSION_ID: rawId }
+  )
+  assert.equal(deferred.status, 0, 'the question is queued')
+
+  const withoutKind = runCli(['dashboard', 'item', 'add', '--type', 'approval', '--prompt', 'p'], {
+    AI_WORKFLOW_APP_BIN: stubBin,
+    CLAUDE_CODE_SESSION_ID: rawId,
+  })
+  assert.equal(
+    withoutKind.status,
+    1,
+    'an undeclared approval is refused while a question is queued'
+  )
+  assert.equal(withoutKind.stdout, '', 'a refused post prints nothing')
+  assert.ok(
+    stderrBeyondNodeWarnings(withoutKind.stderr).startsWith(
+      'dashboard: refusing to post an approval — this node has 1 deferred question(s) '
+    ),
+    'the refusal names the deferred queue'
+  )
+
+  const { stdout, stderr, status } = runCli(
+    [
+      'dashboard',
+      'item',
+      'add',
+      '--type',
+      'approval',
+      '--prompt',
+      'p',
+      '--approval-kind',
+      'launch',
+    ],
+    { AI_WORKFLOW_APP_BIN: stubBin, CLAUDE_CODE_SESSION_ID: rawId }
+  )
+
+  assert.equal(status, 0, 'exits 0 with the launch override')
+  assert.equal(stdout, '{"itemId":"item-launch-deferred"}\n', 'the item was actually posted')
+  assert.equal(stderrBeyondNodeWarnings(stderr), '', 'nothing on stderr')
+})
+
 const infoPostStdout = (itemId: string, nodeId: string): string =>
   JSON.stringify({
     itemId,
@@ -1235,7 +1328,7 @@ test('CLI: item add --type approval rejects an --approval-kind value outside the
   assert.equal(status, 252, "exits with Stricli's flag-parse error code")
   assert.ok(stderr.includes('--approval-kind'), 'stderr names the rejected flag')
   assert.ok(
-    stderr.includes('must be hold, credential or checkpoint'),
+    stderr.includes('must be hold, credential, checkpoint or launch'),
     'stderr states the enum itself, not just that some rejection happened — S-12: this is what ' +
       'distinguishes "enum rejected bogus" from "the flag does not exist at all"'
   )
@@ -2421,6 +2514,50 @@ test('CLI: dashboard session launch-title refuses a blank --title', () => {
   assert.equal(
     stderrBeyondNodeWarnings(run.stderr),
     'Failed to parse "  " for title: --title must not be blank'
+  )
+})
+
+test('CLI: dashboard session launch refuses a whitespace-only --directory and --prompt-file', () => {
+  const blankDirectory = runCli(
+    [
+      'dashboard',
+      'session',
+      'launch',
+      '--directory',
+      '  ',
+      '--title',
+      'T',
+      '--prompt-file',
+      'p.txt',
+    ],
+    { CLAUDE_CODE_SESSION_ID: rawId }
+  )
+  const blankPromptFile = runCli(
+    [
+      'dashboard',
+      'session',
+      'launch',
+      '--directory',
+      '/tmp/work',
+      '--title',
+      'T',
+      '--prompt-file',
+      ' ',
+    ],
+    { CLAUDE_CODE_SESSION_ID: rawId }
+  )
+
+  assert.equal(blankDirectory.status, 252)
+  assert.equal(blankDirectory.stdout, '')
+  assert.equal(
+    stderrBeyondNodeWarnings(blankDirectory.stderr),
+    'Failed to parse "  " for directory: --directory must not be blank'
+  )
+  assert.equal(blankPromptFile.status, 252)
+  assert.equal(blankPromptFile.stdout, '')
+  assert.equal(
+    stderrBeyondNodeWarnings(blankPromptFile.stderr),
+    'Failed to parse " " for prompt-file: --prompt-file must not be blank'
   )
 })
 

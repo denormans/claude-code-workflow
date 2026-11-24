@@ -1,5 +1,6 @@
 import { buildCommand, buildRouteMap } from '@stricli/core'
 import { runWalkthroughRender } from '../walkthrough/main.ts'
+import { runWalkthroughNarrate } from '../walkthrough/narrate.ts'
 
 const renderCommand = buildCommand({
   docs: {
@@ -45,7 +46,46 @@ const renderCommand = buildCommand({
   },
 })
 
+const narrateCommand = buildCommand({
+  docs: {
+    brief: 'Voice the scenes of a video whose visuals are drawn elsewhere',
+    fullDescription:
+      'Reads a narration script (JSON: scenes, each with an id, its narration and optional cues ' +
+      'copied from the narration), voices each scene with the same voice order and the same ' +
+      '<script-basename>.cache/ as render, copies each scene to <id>.<ext> in the out dir, and ' +
+      'prints a JSON summary to stdout: whether it was narrated, the voice, and per scene the ' +
+      'audio file, its duration in seconds and the time of each cue. With no voice configured ' +
+      'nothing is voiced: narrated is false, audioFile is null and the duration is the time ' +
+      'reading the narration takes. Exits 2 when the voice needs a tool that cannot run, and 1 ' +
+      'when the chosen macOS voice is not installed or the Kokoro speaker is not usable, the ' +
+      'script is invalid or unreadable, the out dir cannot be used, the cache dir cannot be ' +
+      'used while a scene still needs voicing, voicing ' +
+      'fails, a cue is not ' +
+      "in the voice's alignment or an audio file cannot be written.",
+  },
+  parameters: {
+    flags: {
+      script: {
+        kind: 'parsed',
+        parse: String,
+        brief: 'Path to the narration script JSON',
+        optional: false,
+      },
+      'out-dir': {
+        kind: 'parsed',
+        parse: String,
+        brief: 'Directory to write each scene audio file to',
+        optional: false,
+      },
+    },
+    positional: { kind: 'tuple', parameters: [] },
+  },
+  async func(flags: { script: string; 'out-dir': string }) {
+    await runWalkthroughNarrate(flags.script, flags['out-dir'])
+  },
+})
+
 export const walkthroughRoutes = buildRouteMap({
-  routes: { render: renderCommand },
-  docs: { brief: 'Architecture walkthrough videos' },
+  routes: { render: renderCommand, narrate: narrateCommand },
+  docs: { brief: 'Walkthrough videos' },
 })

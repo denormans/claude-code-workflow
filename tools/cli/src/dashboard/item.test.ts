@@ -1044,19 +1044,20 @@ test('runItemAdd approval: refused when the board reports an open question', () 
     'the actual count reaches stderr, not just a generic refusal or a hardcoded 1'
   )
   assert.ok(
-    stderrOut.includes('Only three kinds of approval are exempt'),
+    stderrOut.includes('Only four kinds of approval are exempt'),
     'states the count of exempt approval kinds'
   )
   assert.ok(stderrOut.includes('--approval-kind hold'), 'names the hold override')
   assert.ok(stderrOut.includes('--approval-kind credential'), 'names the credential override')
   assert.ok(stderrOut.includes('--approval-kind checkpoint'), 'names the checkpoint override')
+  assert.ok(stderrOut.includes('--approval-kind launch'), 'names the launch override')
   assert.ok(
-    stderrOut.includes('There is no fourth exempt category'),
-    'states there is no fourth exempt category'
+    stderrOut.includes('There is no fifth exempt category'),
+    'states there is no fifth exempt category'
   )
   assert.ok(
-    stderrOut.includes('if this is none of the three, it is an advancement approval'),
-    'states the fall-through: anything not one of the three is an advancement approval'
+    stderrOut.includes('if this is none of the four, it is an advancement approval'),
+    'states the fall-through: anything not one of the four is an advancement approval'
   )
   assert.ok(
     stderrOut.includes('skills/board/references/dashboard-protocol.md'),
@@ -1225,10 +1226,11 @@ test('runItemAdd: rejects --approval-kind + --type question even with the board 
   assert.equal(readCalls(tmpDir).length, 0, 'the nonexistent binary was never even invoked')
 })
 
-// The escape hatch for HOLD / credential / checkpoint asks
+// The escape hatch for the exempt approval kinds
 // (skills/board/references/dashboard-protocol.md §3.1) — an enum, not free
-// text: it supplies a missing fact ("this is a HOLD"), not a self-judged permission. Exactly three
-// values are recognized; all three are exercised so none collapses into "any truthy override works".
+// text: it supplies a missing fact ("this is a HOLD"), not a self-judged permission. The tests below
+// exercise hold, credential and checkpoint separately so none collapses into "any truthy override
+// works"; `launch` is exercised through the CLI in commands/dashboard.test.ts.
 test('runItemAdd approval: --approval-kind hold overrides the guard', () => {
   const sessionId = process.env.CLAUDE_CODE_SESSION_ID!
   process.env.AI_WORKFLOW_APP_BIN = writeBranchingStub(
@@ -3699,12 +3701,16 @@ test('flush-deferred refuses while an approval is open on the node', () => {
     captureStdout(() => runItemFlushDeferred({ session: sessionId }))
   )
 
-  assert.ok(stderrOut.includes('refusing to flush'), 'refusal explained on stderr')
-  assert.ok(stderrOut.includes('1 open approval(s)'), 'the actual count reaches stderr')
-  assert.ok(
-    stderrOut.includes('withdraw --item "<id>"'),
-    'the withdraw example quotes <id> — copied verbatim into a shell it is an argument, not input ' +
-      'redirection'
+  assert.equal(
+    stderrOut,
+    'dashboard: refusing to flush — this node has 1 open approval(s).\n' +
+      'A flush posts a question, and an approval asserting the work is finished must not sit ' +
+      'alongside one asserting it is still being decided ' +
+      '(skills/board/references/dashboard-protocol.md §3.1).\n' +
+      'If it is an advancement approval, withdraw it first (`dashboard item withdraw --item ' +
+      '"<id>"`) and post a fresh one after the flush is answered. If it is a HOLD, a credential ask, ' +
+      'a checkpoint or a launch request, answer and consume it first — this CLI cannot tell which ' +
+      'it is, because --approval-kind is declared at post time and the board does not report it back.\n'
   )
   assert.equal(exitCodeIsError(), true)
   assert.equal(

@@ -10,6 +10,11 @@ import type {
   PrState,
   Review,
   ReviewThread,
+  RefusalIdentity,
+  StatedReviewerWait,
+  StuckCheck,
+  CheckRun,
+  ThreadComments,
 } from './state.ts'
 
 // --- Retry helper ---
@@ -21,8 +26,12 @@ const GH_CALL_TIMEOUT_MS = 30_000
 // The deadline of the fetchPrState call in progress (null outside one). fetchPrState is
 // synchronous, so one module-level slot is enough: every gh call below clamps its timeout to the
 // time left, and no retry starts past it. A call that hits the deadline fails like any other
-// failed read and is recorded in `failures`, so fetchPrState reports the poll as UNKNOWN.
+// failed read. On a required read it is recorded in `failures`, so fetchPrState reports the poll
+// as UNKNOWN; on an optional read (`runOptional`) it loses only that read's own signal.
 let activeDeadlineMs: number | null = null
+// Optional reads in one call may spend only the first half of its time, so the required reads and
+// the caller's confirm fetch keep the rest.
+let optionalDeadlineMs: number | null = null
 let failures: string[] = []
 let isDeadlineHit = false
 
@@ -38,6 +47,24 @@ const callTimeoutMs = (): number => {
   }
 
   return Math.max(1, Math.floor(Math.min(GH_CALL_TIMEOUT_MS, remaining)))
+}
+
+// A read whose signal is optional: running out of time in it loses only that signal, so the
+// deadline flag and the failures the poll reports stay as they were before it.
+const runOptional = <T>(read: () => T): T => {
+  const wasDeadlineHit = isDeadlineHit
+  const failureCount = failures.length
+  const requiredDeadlineMs = activeDeadlineMs
+  if (requiredDeadlineMs !== null && optionalDeadlineMs !== null) {
+    activeDeadlineMs = Math.min(requiredDeadlineMs, optionalDeadlineMs)
+  }
+  try {
+    return read()
+  } finally {
+    activeDeadlineMs = requiredDeadlineMs
+    isDeadlineHit = wasDeadlineHit
+    failures.length = failureCount
+  }
 }
 
 const isPastDeadline = (): boolean => activeDeadlineMs !== null && Date.now() >= activeDeadlineMs
@@ -188,12 +215,122 @@ const detectCoderabbitSkipped = (comments: PrViewResult['comments']): boolean =>
     (c) => c.author?.login === 'coderabbitai' && c.body.includes(CODERABBIT_SKIP_MARKER)
   )
 
+const CODERABBIT_REFUSAL_TEXT = 'Review rate limited'
+
+const SECONDS_PER_UNIT: Record<string, number> = { hour: 3600, minute: 60, second: 1 }
+
+// Every unit of the stated time counts, so `27 minutes and 4 seconds` is 1624 seconds, not 27 minutes.
+export const parseCooloffSeconds = (body: string): number | null => {
+  const m = body.match(
+    /next (?:included )?review (?:will be )?available in\b[^\d]{0,40}?((?:\d+\s*(?:hour|minute|second)s?(?:[\s,*]|and)*)+)/is
+  )
+  if (!m) {
+    return null
+  }
+
+  let total = 0
+  for (const part of m[1].matchAll(/(\d+)\s*(hour|minute|second)/gi)) {
+    total += Number(part[1]) * SECONDS_PER_UNIT[part[2].toLowerCase()]
+  }
+
+  return Number.isFinite(total) ? total : null
+}
+
 export const parseCooloffMinutes = (body: string): number | null => {
-  const m = body.match(/Next (?:included )?review available in\b.*?(\d+)\s*(minute|hour)/is)
-  if (!m) return null
-  const value = Number(m[1])
-  if (!Number.isFinite(value)) return null
-  return m[2].toLowerCase() === 'hour' ? value * 60 : value
+  const seconds = parseCooloffSeconds(body)
+  return seconds === null ? null : Math.ceil(seconds / 60)
+}
+
+const isRefusalBody = (body: string): boolean =>
+  body.includes(CODERABBIT_RATE_LIMITED_MARKER) || body.includes(CODERABBIT_REFUSAL_TEXT)
+
+// The newest rate-limit comment decides: when it states no time, an older stated time no longer
+// describes the reviewer, so there is no wait to act on. `gh pr view` returns every comment, so
+// a refusal anywhere on the PR is found.
+export const findNewestRefusalId = (comments: PrViewResult['comments']): string | undefined =>
+  comments.findLast((c) => c.author?.login === 'coderabbitai' && isRefusalBody(c.body))?.id
+
+export interface RefusalComment {
+  body: string
+  updatedAt: string
+}
+
+export interface RefusalCommentResult {
+  comment: RefusalComment | null
+  fetchFailed: boolean
+}
+
+// `gh pr view` exposes only `createdAt`, and CodeRabbit edits these comments in place: the stated
+// wait runs from the last edit. The body and the edit time come from one node read, so an edit
+// cannot pair an old duration with a new time.
+export const fetchRefusalComment = (
+  commentId: string,
+  execGraphql: GraphqlExecutor = makeExecGhGraphql('fetchRefusalComment')
+): RefusalCommentResult => {
+  try {
+    const query = `
+      query($id: ID!) {
+        node(id: $id) {
+          ... on IssueComment { body updatedAt }
+        }
+      }
+    `
+    const output = execGraphql(['api', 'graphql', '-f', `query=${query}`, '-f', `id=${commentId}`])
+    const node = (
+      JSON.parse(output) as { data: { node: { body?: unknown; updatedAt?: unknown } | null } }
+    ).data.node
+    if (
+      typeof node?.body !== 'string' ||
+      typeof node.updatedAt !== 'string' ||
+      !Number.isFinite(Date.parse(node.updatedAt))
+    ) {
+      throw new Error(`fetchRefusalComment: no body and updatedAt for ${commentId}`)
+    }
+
+    return { comment: { body: node.body, updatedAt: node.updatedAt }, fetchFailed: false }
+  } catch (error) {
+    console.error('PR Monitor: fetchRefusalComment failed', error)
+    recordFailure('fetchRefusalComment', error)
+    return { comment: null, fetchFailed: true }
+  }
+}
+
+export interface ReviewerWaitRead {
+  wait: StatedReviewerWait | undefined
+  // The newest refusal when it states no time; null when there is none to report, undefined when
+  // the read failed and nothing is known.
+  untimedRefusal: RefusalIdentity | null | undefined
+  readFailed: boolean
+}
+
+// The comment read is optional: running out of time in it leaves the wait unread, not the poll.
+const readStatedReviewerWait = (comments: PrViewResult['comments']): ReviewerWaitRead => {
+  const commentId = findNewestRefusalId(comments)
+  if (commentId === undefined) {
+    return { wait: undefined, untimedRefusal: null, readFailed: false }
+  }
+
+  const { comment, fetchFailed } = runOptional(() => fetchRefusalComment(commentId))
+  if (fetchFailed || comment === null) {
+    return { wait: undefined, untimedRefusal: undefined, readFailed: true }
+  }
+
+  if (!isRefusalBody(comment.body)) {
+    return { wait: undefined, untimedRefusal: null, readFailed: false }
+  }
+
+  const seconds = parseCooloffSeconds(comment.body)
+  return seconds === null
+    ? {
+        wait: undefined,
+        untimedRefusal: { commentId, updatedAt: comment.updatedAt },
+        readFailed: false,
+      }
+    : {
+        wait: { commentId, updatedAt: comment.updatedAt, seconds },
+        untimedRefusal: null,
+        readFailed: false,
+      }
 }
 
 export const detectCoderabbitStatus = (comments: PrViewResult['comments']): CoderabbitDetection => {
@@ -212,32 +349,41 @@ export const detectCoderabbitStatus = (comments: PrViewResult['comments']): Code
 
 // --- Composite fetcher ---
 
-// `deadlineMs` is an absolute Date.now() time. A gh call that cannot finish by it fails, and the
-// poll is reported UNKNOWN with the failures in `unknownReason`.
+// `deadlineMs` is an absolute Date.now() time. A required gh call that cannot finish by it fails,
+// and the poll is reported UNKNOWN with the failures in `unknownReason`; an optional read that
+// cannot leaves only its own signal unread.
 export const fetchPrState = (prNumber: string, repo: string, deadlineMs?: number): PrState => {
+  const startedAt = Date.now()
   activeDeadlineMs = deadlineMs ?? null
+  optionalDeadlineMs = deadlineMs === undefined ? null : startedAt + (deadlineMs - startedAt) / 2
   failures = []
   isDeadlineHit = false
   try {
     return fetchPrStateWithinDeadline(prNumber, repo)
   } finally {
     activeDeadlineMs = null
+    optionalDeadlineMs = null
   }
 }
 
 const fetchPrStateWithinDeadline = (prNumber: string, repo: string): PrState => {
+  const commentsReadStartedAt = new Date().toISOString()
   const prView = fetchPrView(prNumber, repo)
   const coderabbit = detectCoderabbitStatus(prView.comments)
   const reviews = fetchReviews(prNumber, repo)
   const unresolved = fetchUnresolvedThreads(prNumber, repo)
   const ci = fetchCiChecks(prNumber, repo)
+  const reviewerWait = readStatedReviewerWait(prView.comments)
   const prState = isDeadlineHit
     ? 'UNKNOWN'
     : resolvePrState(prView, reviews.fetchFailed, unresolved.fetchFailed)
   return {
     ciChecks: ci.checks,
     ciChecksFetchFailed: ci.fetchFailed,
+    stuckChecks: ci.stuckChecks,
+    unreadRunChecks: ci.unreadRunChecks,
     unresolvedThreads: unresolved.threads,
+    threadComments: unresolved.threadComments,
     fetchFailed: unresolved.fetchFailed,
     prState,
     isDraft: prView.isDraft,
@@ -245,6 +391,10 @@ const fetchPrStateWithinDeadline = (prNumber: string, repo: string): PrState => 
     coderabbitSkipped: detectCoderabbitSkipped(prView.comments),
     coderabbitStatus: coderabbit.status,
     coderabbitCooloffMinutes: coderabbit.cooloffMinutes,
+    statedReviewerWait: reviewerWait.wait,
+    untimedRefusal: reviewerWait.untimedRefusal,
+    reviewerWaitReadFailed: reviewerWait.readFailed,
+    commentsReadStartedAt,
     coderabbitThrottleCount: 0, // authoritative value is set by compareStates
     mergeable: prView.mergeable?.toUpperCase() ?? 'UNKNOWN',
     mergeStateStatus: prView.mergeStateStatus?.toUpperCase() ?? 'UNKNOWN',
@@ -257,14 +407,14 @@ const fetchPrStateWithinDeadline = (prNumber: string, repo: string): PrState => 
   }
 }
 
-// latestDecisionByAuthor reads only .author/.state from a persisted review; authorType is kept
-// only because Review declares it non-optional. compareStates reaches reviews through
-// isMergeReady/latestDecisionByAuthor — id/body are the only fields dropped here rather than
-// rewritten to disk on every poll.
-export const toPersistedReview = ({ author, authorType, state }: Review): Review => ({
+// latestDecisionByAuthor reads .author/.state from a persisted review, and the stale-review check
+// reads .commitId; authorType is kept only because Review declares it non-optional. id/body are the
+// only fields dropped here rather than rewritten to disk on every poll.
+export const toPersistedReview = ({ author, authorType, state, commitId }: Review): Review => ({
   author,
   authorType,
   state,
+  ...(commitId ? { commitId } : {}),
 })
 
 // fetchReviews and fetchUnresolvedThreads are GraphQL calls independent of fetchPrView's, so either
@@ -294,6 +444,8 @@ export const resolvePrState = (
 export interface CiChecksResult {
   checks: Record<string, string>
   fetchFailed: boolean
+  stuckChecks: StuckCheck[]
+  unreadRunChecks: CheckRun[]
 }
 
 // Reports whether the read succeeded, rather than returning a bare map. The accumulator used to be
@@ -306,7 +458,7 @@ export type ChecksExecutor = (prNumber: string, repo: string) => string
 const execGhChecks: ChecksExecutor = (prNumber, repo) =>
   withRetry(
     () =>
-      execFileSync('gh', ['pr', 'checks', prNumber, '--repo', repo, '--json', 'name,state'], {
+      execFileSync('gh', ['pr', 'checks', prNumber, '--repo', repo, '--json', 'name,state,link'], {
         encoding: 'utf-8',
         timeout: callTimeoutMs(),
       }),
@@ -316,7 +468,8 @@ const execGhChecks: ChecksExecutor = (prNumber, repo) =>
 export const fetchCiChecks = (
   prNumber: string,
   repo: string,
-  execChecks: ChecksExecutor = execGhChecks
+  execChecks: ChecksExecutor = execGhChecks,
+  readRunStatus: RunStatusReader = readGhRunStatus
 ): CiChecksResult => {
   const result: Record<string, string> = {}
   try {
@@ -348,6 +501,11 @@ export const fetchCiChecks = (
       const existing = result[check.name]
       result[check.name] = existing === undefined ? status : worseCiStatus(existing, status)
     }
+
+    const { stuck, unread } = findStuckChecks(checks, repo, readRunStatus, () =>
+      JSON.parse(execChecks(prNumber, repo))
+    )
+    return { checks: result, fetchFailed: false, stuckChecks: stuck, unreadRunChecks: unread }
   } catch (error) {
     recordFailure('fetchCiChecks', error)
     // Unlike fetchReviews and fetchUnresolvedThreads, this catch is not routed through
@@ -357,10 +515,125 @@ export const fetchCiChecks = (
     // An unreadable checks fetch and a genuinely empty one are opposite facts, though. The empty
     // case is already fail-closed at `checks.length > 0` in isMergeReady/isCiGreenOnDraft, so this
     // one still has to say it could not read — via ciChecksFetchFailed, not prState.
-    return { checks: {}, fetchFailed: true }
+    return { checks: {}, fetchFailed: true, stuckChecks: [], unreadRunChecks: [] }
+  }
+}
+
+export interface RunStatus {
+  status: string
+  attempt: number
+}
+
+export type RunStatusReader = (repo: string, runId: string) => RunStatus
+
+// `run_attempt` is read with the status because a re-run keeps its run id and increments it.
+const readGhRunStatus: RunStatusReader = (repo, runId) => {
+  const output = withRetry(
+    () =>
+      execFileSync(
+        'gh',
+        ['api', `repos/${repo}/actions/runs/${runId}`, '--jq', '{status, attempt: .run_attempt}'],
+        { encoding: 'utf-8', timeout: callTimeoutMs() }
+      ),
+    'readRunStatus'
+  )
+  const parsed = JSON.parse(output) as Partial<RunStatus>
+  if (typeof parsed.status !== 'string' || !Number.isInteger(parsed.attempt)) {
+    throw new Error(`readRunStatus: unexpected payload for run ${runId} (${output.trim()})`)
   }
 
-  return { checks: result, fetchFailed: false }
+  return { status: parsed.status, attempt: parsed.attempt as number }
+}
+
+// A check is stuck when it still reads in progress although the workflow run it belongs to has
+// completed. Only a GitHub Actions link that names a job (`/actions/runs/<run>/job/<job>`) names a
+// run and identifies the job across attempts; any other link is never reported stuck. A run that could not be read is not evidence
+// either way, so its checks are listed as unread and the comparison keeps their previous state.
+//
+// The check state and the run status are two reads, so a job that finished between them reads as in
+// progress on a completed run. A run that read completed was already completed before the checks
+// are read once more, so a check still in progress on that run in the second read is stuck. The
+// second read happens once however many runs completed, and a failed one leaves those checks unread.
+const findStuckChecks = (
+  checks: CiCheck[],
+  repo: string,
+  readRunStatus: RunStatusReader,
+  rereadChecks: () => CiCheck[]
+): { stuck: StuckCheck[]; unread: CheckRun[] } => {
+  const statusByRun = new Map<string, RunStatus | null>()
+  const candidates: Array<StuckCheck & { link: string }> = []
+  const unread: CheckRun[] = []
+
+  for (const check of checks) {
+    const runId = runIdOf(check)
+    if (!isInProgress(check) || !runId) {
+      continue
+    }
+
+    if (!statusByRun.has(runId)) {
+      statusByRun.set(runId, readStatusOrNull(repo, runId, readRunStatus))
+    }
+
+    const run = statusByRun.get(runId)
+    if (!run) {
+      unread.push({ name: check.name, runId })
+    } else if (run.status === 'completed') {
+      candidates.push({ name: check.name, runId, attempt: run.attempt, link: check.link ?? '' })
+    }
+  }
+
+  if (candidates.length === 0) {
+    return { stuck: [], unread }
+  }
+
+  const fresh = rereadOrNull(rereadChecks)
+  if (!fresh) {
+    return {
+      stuck: [],
+      unread: [...unread, ...candidates.map(({ name, runId }) => ({ name, runId }))],
+    }
+  }
+
+  // A check's link names its job, and a re-run starts new jobs, so the same link in progress means
+  // the attempt the status read saw is the one still stuck.
+  const stuck = candidates
+    .filter((c) => fresh.some((f) => f.name === c.name && isInProgress(f) && f.link === c.link))
+    .map(({ name, runId, attempt }) => ({ name, runId, attempt }))
+
+  return { stuck, unread }
+}
+
+const isInProgress = (check: CiCheck): boolean =>
+  String(check.state ?? '').toUpperCase() === 'IN_PROGRESS'
+
+const runIdOf = (check: CiCheck): string | undefined =>
+  check.link?.match(/\/actions\/runs\/(\d+)\/job\/\d+/)?.[1]
+
+const rereadOrNull = (rereadChecks: () => CiCheck[]): CiCheck[] | null => {
+  try {
+    const checks = runOptional(rereadChecks)
+    if (!Array.isArray(checks)) {
+      throw new Error('the checks re-read is not an array')
+    }
+
+    return checks
+  } catch (error) {
+    console.error('PR Monitor: re-reading the checks failed', error)
+    return null
+  }
+}
+
+const readStatusOrNull = (
+  repo: string,
+  runId: string,
+  readRunStatus: RunStatusReader
+): RunStatus | null => {
+  try {
+    return runOptional(() => readRunStatus(repo, runId))
+  } catch (error) {
+    console.error(`PR Monitor: reading run ${runId} failed`, error)
+    return null
+  }
 }
 
 // Worst first: anything non-green must survive a collision with anything green.
@@ -384,6 +657,7 @@ interface ReviewNode {
   state: string
   body: string
   author: { __typename: string; login: string } | null
+  commit: { oid: string } | null
 }
 
 // Reports whether the read succeeded, rather than a bare list, mirroring fetchUnresolvedThreads and
@@ -406,6 +680,7 @@ export const fetchReviews = (
                 id
                 state
                 body
+                commit { oid }
                 author {
                   __typename
                   login
@@ -429,6 +704,7 @@ export const fetchReviews = (
       authorType: r.author?.__typename ?? 'Unknown',
       state: r.state,
       body: r.body ?? '',
+      commitId: r.commit?.oid,
     }))
     return { reviews, fetchFailed: false }
   } catch (error) {
@@ -440,6 +716,7 @@ export const fetchReviews = (
 
 export interface UnresolvedThreadsResult {
   threads: ReviewThread[]
+  threadComments: ThreadComments[]
   fetchFailed: boolean
 }
 
@@ -470,6 +747,9 @@ export const fetchUnresolvedThreads = (
                     body
                   }
                 }
+                recentComments: comments(last: 20) {
+                  nodes { id }
+                }
               }
             }
           }
@@ -483,11 +763,15 @@ export const fetchUnresolvedThreads = (
       }
       return parsed.data.repository.pullRequest.reviewThreads
     })
-    return { threads: toReviewThreads(nodes), fetchFailed: false }
+    return {
+      threads: toReviewThreads(nodes),
+      threadComments: toThreadComments(nodes),
+      fetchFailed: false,
+    }
   } catch (error) {
     console.error('PR Monitor: fetchUnresolvedThreads failed', error)
     recordFailure('fetchUnresolvedThreads', error)
-    return { threads: [], fetchFailed: true }
+    return { threads: [], threadComments: [], fetchFailed: true }
   }
 }
 
@@ -496,6 +780,7 @@ interface RawReviewThread {
   path: string
   line: number | null
   comments: { nodes: Array<{ id?: string; author: { login: string } | null; body: string }> }
+  recentComments?: { nodes: Array<{ id: string }> }
 }
 
 // Map GraphQL review-thread nodes to ReviewThread, keeping only unresolved threads.
@@ -503,8 +788,7 @@ interface RawReviewThread {
 // GitHub account, so an author filter would drop the user's own review comments.
 // The first comment's node id is carried instead: a reply this session posted is identified by the
 // id GitHub returned at post time, which is the one identity the shared login cannot supply
-// (FLOW-261). `first: 1` is unchanged — only each thread's first comment is fetched, so replies
-// posted INSIDE an existing thread stay unobserved.
+// (FLOW-261). Replies inside an existing thread are read by toThreadComments.
 export const toReviewThreads = (nodes: RawReviewThread[]): ReviewThread[] =>
   nodes
     .filter((t) => !t.isResolved)
@@ -515,6 +799,21 @@ export const toReviewThreads = (nodes: RawReviewThread[]): ReviewThread[] =>
       firstCommentBody: t.comments.nodes[0]?.body ?? '',
       firstCommentId: t.comments.nodes[0]?.id ?? '',
     }))
+
+// Every thread, resolved ones included: a reviewer can answer inside a thread already resolved.
+export const toThreadComments = (nodes: RawReviewThread[]): ThreadComments[] =>
+  nodes.flatMap((t) => {
+    const firstCommentId = t.comments.nodes[0]?.id
+    if (!firstCommentId) {
+      return []
+    }
+
+    const replyIds = (t.recentComments?.nodes ?? [])
+      .map((c) => c.id)
+      .filter((id) => id !== firstCommentId)
+
+    return [{ firstCommentId, path: t.path, replyIds }]
+  })
 
 // --- GraphQL cursor pagination ---
 

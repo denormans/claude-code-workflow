@@ -14,9 +14,13 @@ import {
   MAX_PAGES,
   paginateConnection,
   parseCooloffMinutes,
+  parseCooloffSeconds,
+  fetchRefusalComment,
+  findNewestRefusalId,
   resolvePrState,
   toPersistedReview,
   toReviewThreads,
+  toThreadComments,
 } from './gh.ts'
 import type { ConnectionPage } from './gh.ts'
 import { cleanBaseline, compareStates, type PrState } from './state.ts'
@@ -33,6 +37,71 @@ test('parseCooloffMinutes converts hours to minutes', () => {
 test('parseCooloffMinutes reads the included-review banner wording', () => {
   const body = `${CODERABBIT_RATE_LIMITED_MARKER}\n> ## Review limit reached\n> \n> **Next included review available in 55 minutes.**`
   assert.equal(parseCooloffMinutes(body), 55)
+})
+
+test('parseCooloffMinutes reads the seconds form and rounds it up to a minute', () => {
+  assert.equal(parseCooloffMinutes('Your next included review will be available in 34 seconds.'), 1)
+  assert.equal(parseCooloffMinutes('Next included review available in 21 minutes'), 21)
+})
+
+test('parseCooloffMinutes sums every unit of a compound time', () => {
+  assert.equal(
+    parseCooloffMinutes('Your next included review will be available in 27 minutes and 4 seconds.'),
+    28
+  )
+  assert.equal(
+    parseCooloffSeconds('next review available in 1 hour, 2 minutes and 3 seconds'),
+    3723
+  )
+})
+
+test('findNewestRefusalId follows the newest rate-limit comment, however far back', () => {
+  const comment = (id: string, body: string, login = 'coderabbitai') => ({
+    id,
+    author: { login },
+    body,
+  })
+  const stated = `${CODERABBIT_RATE_LIMITED_MARKER}\nNext included review available in 21 minutes`
+  const refusal = 'Review rate limited. Please try again later.'
+
+  assert.equal(findNewestRefusalId([comment('a', stated)]), 'a')
+  assert.equal(findNewestRefusalId([comment('a', stated), comment('b', refusal)]), 'b')
+  assert.equal(findNewestRefusalId([comment('a', refusal), comment('b', stated)]), 'b')
+  assert.equal(findNewestRefusalId([comment('a', stated, 'someone')]), undefined)
+  assert.equal(findNewestRefusalId([]), undefined)
+
+  const chatter = Array.from({ length: 60 }, (_, i) => comment(`x${i}`, `later ${i}`, 'someone'))
+  assert.equal(
+    findNewestRefusalId([comment('a', stated), ...chatter]),
+    'a',
+    'a refusal followed by many comments was not found'
+  )
+})
+
+test('fetchRefusalComment reads body and edit time in one node read and reports a failed read', () => {
+  const calls: string[][] = []
+  const ok = fetchRefusalComment('IC_1', (args) => {
+    calls.push(args)
+    return JSON.stringify({
+      data: {
+        node: { body: 'Next review available in 7 minutes', updatedAt: '2026-01-01T00:07:00Z' },
+      },
+    })
+  })
+  assert.deepEqual(ok, {
+    comment: { body: 'Next review available in 7 minutes', updatedAt: '2026-01-01T00:07:00Z' },
+    fetchFailed: false,
+  })
+  assert.equal(calls.length, 1, 'the body and the edit time were read separately')
+  assert.ok(calls[0].includes('id=IC_1'), 'the comment id was not passed to the query')
+
+  const failed = fetchRefusalComment('IC_1', () => {
+    throw new Error('gh: 502')
+  })
+  assert.deepEqual(failed, { comment: null, fetchFailed: true })
+
+  const missing = fetchRefusalComment('IC_1', () => JSON.stringify({ data: { node: null } }))
+  assert.deepEqual(missing, { comment: null, fetchFailed: true })
 })
 
 test('parseCooloffMinutes returns null when unparseable', () => {
@@ -150,6 +219,21 @@ test('extractMainComments skips a PENDING review body', () => {
   assert.deepEqual(extractMainComments([], reviews), [])
 })
 
+test('toPersistedReview keeps commitId when present and adds no key when absent', () => {
+  const review = { id: 'PRR_2', author: 'alice', authorType: 'User', state: 'APPROVED', body: 'b' }
+  assert.deepEqual(toPersistedReview({ ...review, commitId: 'abc123' }), {
+    author: 'alice',
+    authorType: 'User',
+    state: 'APPROVED',
+    commitId: 'abc123',
+  })
+  assert.deepEqual(Object.keys(toPersistedReview({ ...review, commitId: undefined })), [
+    'author',
+    'authorType',
+    'state',
+  ])
+})
+
 test('toPersistedReview strips id and body, keeping author/authorType/state', () => {
   const review = {
     id: 'PRR_1',
@@ -183,6 +267,32 @@ test('toReviewThreads includes an unresolved thread authored by the current user
       firstCommentId: '',
     },
   ])
+})
+
+test('toThreadComments keeps resolved threads and lists only the replies', () => {
+  const thread = (
+    isResolved: boolean,
+    path: string,
+    firstId: string | null,
+    recent?: string[]
+  ): Parameters<typeof toThreadComments>[0][number] => ({
+    isResolved,
+    path,
+    line: 1,
+    comments: { nodes: firstId ? [{ id: firstId, author: null, body: 'b' }] : [] },
+    ...(recent ? { recentComments: { nodes: recent.map((id) => ({ id })) } } : {}),
+  })
+  assert.deepEqual(
+    toThreadComments([
+      thread(true, 'a.ts', 'c1', ['c1', 'c2', 'c3']),
+      thread(false, 'b.ts', null, ['c9']),
+      thread(false, 'c.ts', 'd1'),
+    ]),
+    [
+      { firstCommentId: 'c1', path: 'a.ts', replyIds: ['c2', 'c3'] },
+      { firstCommentId: 'd1', path: 'c.ts', replyIds: [] },
+    ]
+  )
 })
 
 test('toReviewThreads drops resolved threads', () => {
@@ -310,6 +420,101 @@ test('fetchUnresolvedThreads reports its failure on stderr, independent of fetch
   assert.doesNotMatch(stderr, /PR Monitor: fetchReviews failed/)
 })
 
+test('a hung optional read leaves the required confirm fetch time to succeed', async () => {
+  const checks = JSON.stringify([
+    {
+      name: 'ended',
+      state: 'IN_PROGRESS',
+      link: 'https://github.com/acme/app/actions/runs/1/job/9',
+    },
+  ])
+  const env = {
+    ...process.env,
+    PATH: `${FAKE_GH_DIR}:${process.env.PATH}`,
+    CHECKS_JSON: checks,
+    RUN_SLEEP_SECS: '60',
+    CONFIRM_FETCH: '1',
+  }
+
+  const result = await runFetchFailureChild(env, 4_000.5)
+  assert.equal(result.code, 0, result.stderr)
+  assert.equal(
+    result.stdout,
+    'OPEN\nOPEN',
+    'the first fetch spent the whole slice in an optional read, so the confirm fetch started expired'
+  )
+})
+
+test('a deadline hit in an optional read loses only that signal, not the poll', async () => {
+  const checks = JSON.stringify([
+    {
+      name: 'ended',
+      state: 'IN_PROGRESS',
+      link: 'https://github.com/acme/app/actions/runs/1/job/9',
+    },
+  ])
+  const comments = JSON.stringify([
+    { id: 'IC_1', author: { login: 'coderabbitai' }, body: 'Review rate limited. Try again.' },
+  ])
+  const env = {
+    ...process.env,
+    PATH: `${FAKE_GH_DIR}:${process.env.PATH}`,
+    CHECKS_JSON: checks,
+    COMMENTS_JSON: comments,
+    REPORT_OPTIONAL_READS: '1',
+  }
+
+  const control = await runFetchFailureChild(env, 8_000)
+  assert.equal(control.code, 0, control.stderr)
+  const [controlState, controlUnread] = control.stdout.split('\n')
+  assert.equal(controlState, 'OPEN')
+  assert.equal(controlUnread, '[[],false]', 'the control run left a signal unread')
+
+  const runRead = await runFetchFailureChild({ ...env, RUN_SLEEP_SECS: '60' }, 2_500.5)
+  assert.equal(runRead.code, 0, runRead.stderr)
+  const [runState, runUnread] = runRead.stdout.split('\n')
+  assert.equal(runState, 'OPEN', 'a hung run-status read made the poll UNKNOWN')
+  assert.equal(
+    runUnread,
+    '[[{"name":"ended","runId":"1"}],true]',
+    'the run read is unread, and the later comment read finds the deadline already past'
+  )
+
+  const commentRead = await runFetchFailureChild({ ...env, NODE_SLEEP_SECS: '60' }, 2_500.5)
+  assert.equal(commentRead.code, 0, commentRead.stderr)
+  const [commentState, commentUnread] = commentRead.stdout.split('\n')
+  assert.equal(commentState, 'OPEN', 'a hung comment read made the poll UNKNOWN')
+  assert.equal(commentUnread, '[[],true]')
+
+  const core = await runFetchFailureChild({ ...env, GH_SLEEP_SECS: '60' }, 2_500.5)
+  assert.equal(core.stdout.split('\n')[0], 'UNKNOWN', 'a hung core read no longer made it UNKNOWN')
+})
+
+test('fetchPrState takes the wait from the node body, not the list body, so an edit between reads cannot pair them', async () => {
+  const comments = JSON.stringify([
+    {
+      id: 'IC_1',
+      author: { login: 'coderabbitai' },
+      body: 'Review rate limited. Next review available in 21 minutes',
+    },
+  ])
+  const { code, stdout, stderr } = await runFetchFailureChild({
+    ...process.env,
+    PATH: `${FAKE_GH_DIR}:${process.env.PATH}`,
+    COMMENTS_JSON: comments,
+    REPORT_REVIEWER_WAIT: '1',
+  })
+
+  assert.equal(code, 0, stderr)
+  const [prState, reviewerWait] = stdout.split('\n')
+  assert.equal(prState, 'OPEN')
+  assert.equal(
+    reviewerWait,
+    JSON.stringify([{ commentId: 'IC_1', updatedAt: '2026-01-01T00:00:00Z', seconds: 420 }, null]),
+    'the duration came from the list body, not the node body read with the edit time'
+  )
+})
+
 // --- Pagination (FLOW-226) ---
 
 const page = <T>(
@@ -385,6 +590,7 @@ test('fetchReviews follows pageInfo across pages, keeping each review its id and
                   id: 'PRR_1',
                   state: 'COMMENTED',
                   body: 'first pass',
+                  commit: { oid: 'c0ffee' },
                   author: { __typename: 'User', login: 'alice' },
                 },
               ],
@@ -404,6 +610,7 @@ test('fetchReviews follows pageInfo across pages, keeping each review its id and
                   id: 'PRR_2',
                   state: 'APPROVED',
                   body: '',
+                  commit: null,
                   author: { __typename: 'User', login: 'bob' },
                 },
               ],
@@ -420,8 +627,22 @@ test('fetchReviews follows pageInfo across pages, keeping each review its id and
   })
   assert.equal(result.fetchFailed, false)
   assert.deepEqual(result.reviews, [
-    { id: 'PRR_1', author: 'alice', authorType: 'User', state: 'COMMENTED', body: 'first pass' },
-    { id: 'PRR_2', author: 'bob', authorType: 'User', state: 'APPROVED', body: '' },
+    {
+      id: 'PRR_1',
+      author: 'alice',
+      authorType: 'User',
+      state: 'COMMENTED',
+      body: 'first pass',
+      commitId: 'c0ffee',
+    },
+    {
+      id: 'PRR_2',
+      author: 'bob',
+      authorType: 'User',
+      state: 'APPROVED',
+      body: '',
+      commitId: undefined,
+    },
   ])
 })
 
@@ -609,6 +830,148 @@ test('a repeated check name keeps the worse status, not the last one (FLOW-226)'
     emitsMergeReady(mergeReadyWith(result)),
     false,
     'a failing check was reported as green because a duplicate name came after it'
+  )
+})
+
+test('fetchCiChecks reports an in-progress check whose workflow run has completed as stuck', () => {
+  const run = (id: string): string => `https://github.com/acme/app/actions/runs/${id}/job/9`
+  const payload = JSON.stringify([
+    { name: 'ended', state: 'IN_PROGRESS', link: run('1') },
+    { name: 'ended-too', state: 'IN_PROGRESS', link: run('1') },
+    { name: 'running', state: 'IN_PROGRESS', link: run('2') },
+    { name: 'external', state: 'IN_PROGRESS', link: 'https://ci.example.com/build/3' },
+    { name: 'done', state: 'SUCCESS', link: run('1') },
+  ])
+  const reads: string[] = []
+  let checkReads = 0
+  const result = fetchCiChecks(
+    '1',
+    'acme/app',
+    () => {
+      checkReads += 1
+      return payload
+    },
+    (_repo, runId) => {
+      reads.push(runId)
+      return { status: runId === '1' ? 'completed' : 'in_progress', attempt: 3 }
+    }
+  )
+  assert.deepEqual(result.stuckChecks, [
+    { name: 'ended', runId: '1', attempt: 3 },
+    { name: 'ended-too', runId: '1', attempt: 3 },
+  ])
+  assert.deepEqual(result.unreadRunChecks, [])
+  assert.deepEqual(reads, ['1', '2'], 'two checks on one run must read it once')
+  assert.equal(checkReads, 2, 'the checks are read once, then once more to confirm')
+  assert.equal(result.checks.ended, 'pending', 'a stuck check stays pending for merge readiness')
+
+  const unreadable = fetchCiChecks(
+    '1',
+    'acme/app',
+    () => payload,
+    () => {
+      throw new Error('gh: 502')
+    }
+  )
+  assert.equal(unreadable.fetchFailed, false)
+  assert.deepEqual(unreadable.stuckChecks, [])
+  assert.deepEqual(unreadable.unreadRunChecks, [
+    { name: 'ended', runId: '1' },
+    { name: 'ended-too', runId: '1' },
+    { name: 'running', runId: '2' },
+  ])
+})
+
+test('an in-progress check with a run-only link is never reported stuck and its run is not read', () => {
+  const runOnly = JSON.stringify([
+    {
+      name: 'ended',
+      state: 'IN_PROGRESS',
+      link: 'https://github.com/acme/app/actions/runs/1',
+    },
+  ])
+  const reads: string[] = []
+  let checkReads = 0
+  const result = fetchCiChecks(
+    '1',
+    'acme/app',
+    () => {
+      checkReads += 1
+      return runOnly
+    },
+    (_repo, runId) => {
+      reads.push(runId)
+      return { status: 'completed', attempt: 1 }
+    }
+  )
+  assert.deepEqual(result.stuckChecks, [])
+  assert.deepEqual(result.unreadRunChecks, [])
+  assert.deepEqual(reads, [], 'a run-only link cannot identify a job, so its run is not read')
+  assert.equal(checkReads, 1, 'no run completed, so no confirming read')
+})
+
+test('a check that finished after its run read completed is not stuck, and a failed re-read keeps it unread', () => {
+  const link = 'https://github.com/acme/app/actions/runs/1/job/9'
+  const running = JSON.stringify([{ name: 'ended', state: 'IN_PROGRESS', link }])
+  const finished = JSON.stringify([{ name: 'ended', state: 'SUCCESS', link }])
+  const completed = () => ({ status: 'completed', attempt: 1 })
+
+  let reads = 0
+  const raced = fetchCiChecks(
+    '1',
+    'acme/app',
+    () => (++reads === 1 ? running : finished),
+    completed
+  )
+  assert.deepEqual(raced.stuckChecks, [], 'a check that had finished was reported stuck')
+  assert.deepEqual(raced.unreadRunChecks, [])
+
+  let attempts = 0
+  const rereadFails = fetchCiChecks(
+    '1',
+    'acme/app',
+    () => {
+      if (++attempts === 2) {
+        throw new Error('gh: 502')
+      }
+      return running
+    },
+    completed
+  )
+  assert.equal(rereadFails.fetchFailed, false)
+  assert.deepEqual(rereadFails.stuckChecks, [])
+  assert.deepEqual(rereadFails.unreadRunChecks, [{ name: 'ended', runId: '1' }])
+
+  let moved = 0
+  const otherRun = JSON.stringify([
+    { name: 'ended', state: 'IN_PROGRESS', link: link.replace('runs/1', 'runs/2') },
+  ])
+  const reRun = fetchCiChecks(
+    '1',
+    'acme/app',
+    () => (++moved === 1 ? running : otherRun),
+    completed
+  )
+  assert.deepEqual(
+    reRun.stuckChecks,
+    [],
+    'a check now on another run was reported stuck on the old'
+  )
+
+  let rerun = 0
+  const nextAttempt = JSON.stringify([
+    { name: 'ended', state: 'IN_PROGRESS', link: link.replace('job/9', 'job/10') },
+  ])
+  const sameRunReRun = fetchCiChecks(
+    '1',
+    'acme/app',
+    () => (++rerun === 1 ? running : nextAttempt),
+    completed
+  )
+  assert.deepEqual(
+    sameRunReRun.stuckChecks,
+    [],
+    'a re-run on the same run was reported stuck from the earlier attempt'
   )
 })
 

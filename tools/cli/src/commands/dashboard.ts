@@ -1,5 +1,5 @@
 import { buildCommand, buildRouteMap } from '@stricli/core'
-import { parseNonBlankString } from '../parse.ts'
+import { parseExactNonBlankString, parseNonBlankString } from '../parse.ts'
 import { setRequestedExitCode } from '../runtime-exit-code.ts'
 import { DashboardEnterRefusal, runEnter } from '../dashboard/enter.ts'
 import { runSessionKey } from '../dashboard/key.ts'
@@ -16,6 +16,9 @@ import {
   runItemFlushDeferred,
   runLaunchTitle,
 } from '../dashboard/item.ts'
+import type { ApprovalKind } from '../dashboard/item.ts'
+import { runSessionLaunch } from '../dashboard/launch.ts'
+import type { SessionLaunchFlags } from '../dashboard/launch.ts'
 import { runItemShow } from '../dashboard/show.ts'
 import type { WhyMine } from '../dashboard/state.ts'
 import {
@@ -369,8 +372,42 @@ const launchTitleCommand = buildCommand({
   },
 })
 
+const launchCommand = buildCommand({
+  docs: {
+    brief:
+      'Start a new session in an iTerm tab. Run only after the user approved it on the board (--approval-kind launch)',
+  },
+  parameters: {
+    flags: {
+      directory: {
+        kind: 'parsed',
+        parse: parseExactNonBlankString('--directory'),
+        brief: 'Absolute path of the directory the session starts in',
+        optional: false,
+      },
+      title: {
+        kind: 'parsed',
+        parse: parseNonBlankString('--title'),
+        brief: 'Title of the new session',
+        optional: false,
+      },
+      'prompt-file': {
+        kind: 'parsed',
+        parse: parseExactNonBlankString('--prompt-file'),
+        brief: 'Path of a file holding the exact starting prompt',
+        optional: false,
+      },
+    },
+    positional: { kind: 'tuple', parameters: [] },
+  },
+  func(flags: SessionLaunchFlags) {
+    runSessionLaunch(flags)
+  },
+})
+
 const sessionRoutes = buildRouteMap({
   routes: {
+    launch: launchCommand,
     enter: enterCommand,
     key: keyCommand,
     'refresh-return': refreshReturnCommand,
@@ -463,13 +500,17 @@ const itemAddCommand = buildCommand({
       key: keyFlag,
       'approval-kind': {
         kind: 'parsed',
-        parse: (s: string): 'hold' | 'credential' | 'checkpoint' => {
-          if (s !== 'hold' && s !== 'credential' && s !== 'checkpoint')
-            throw new Error(`--approval-kind must be hold, credential or checkpoint, got: ${s}`)
+        parse: (s: string): ApprovalKind => {
+          if (s !== 'hold' && s !== 'credential' && s !== 'checkpoint' && s !== 'launch') {
+            throw new Error(
+              `--approval-kind must be hold, credential, checkpoint or launch, got: ${s}`
+            )
+          }
+
           return s
         },
         brief:
-          'Declare this approval a HOLD, a credential/auth/environment ask, or a checkpoint (a paused workflow with nothing to decide) — the ONLY three exemptions from the open-question guard (skills/board/references/dashboard-protocol.md §3.1; the CLI cannot tell these apart from the prompt text). Do not pass this to route around a refusal on an approval that is actually advancement — that refusal is correct; wait instead',
+          'Declare this approval a HOLD, a credential/auth/environment ask, a checkpoint (a paused workflow with nothing to decide), or a request to start a separate session — the ONLY four exemptions from the open-question guard (skills/board/references/dashboard-protocol.md §3.1; the CLI cannot tell these apart from the prompt text). Do not pass this to route around a refusal on an approval that is actually advancement — that refusal is correct; wait instead',
         optional: true,
       },
       recommend: {
@@ -529,7 +570,7 @@ const itemAddCommand = buildCommand({
     prompt: string
     session?: string
     key?: string
-    'approval-kind'?: 'hold' | 'credential' | 'checkpoint'
+    'approval-kind'?: ApprovalKind
     recommend?: string
     stalls?: string
     'why-mine'?: WhyMine

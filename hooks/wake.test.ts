@@ -495,8 +495,9 @@ test('a main-loop turn start clears the background wait; a subagent turn start d
   const afterMs = Date.now()
   await Promise.resolve()
   await Promise.resolve()
-  expect(argvs.length).toBe(1)
-  const [, verb, sub, clear, flag, instant, sessionFlag, sessionId] = argvs[0]!
+  const waitClears = () => argvs.filter((argv) => argv[2] === 'wait')
+  expect(waitClears().length).toBe(1)
+  const [, verb, sub, clear, flag, instant, sessionFlag, sessionId] = waitClears()[0]!
   expect([verb, sub, clear, flag, sessionFlag, sessionId]).toEqual([
     'session',
     'wait',
@@ -512,7 +513,185 @@ test('a main-loop turn start clears the background wait; a subagent turn start d
   await $.turn.start({ text: 'sub', turnId: 't2', agentId: 'agent-1' })
   await Promise.resolve()
   await Promise.resolve()
-  expect(argvs.length).toBe(1)
+  expect(argvs.length).toBe(2)
+})
+
+test('turn.start marks the turn start for failed-turn recovery with the turn start time', async ($, on) => {
+  mock.clock(on)
+  mock.store(on)
+  const argvs: string[][] = []
+  let promptId: string | undefined = 'prompt-1'
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  on('session.id', () => answer('sess-1'))
+  on('session.info', () => answer({ promptId }))
+  on('process.run', ($, e) => {
+    argvs.push([...e.argv])
+    return answer({ exitCode: 0, stdout: '', stderr: '' })
+  })
+  on('turn.start', ($, e) => ({ turnId: e.turnId }))
+  await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+  const flush = async (): Promise<void> => {
+    for (let tick = 0; tick < 10; tick += 1) {
+      await Promise.resolve()
+    }
+  }
+
+  const beforeMs = Date.now()
+  await $.turn.start({ text: 'hi', turnId: 't1' })
+  const afterMs = Date.now()
+  await flush()
+  const marks = argvs.filter((argv) => argv[1] === 'turn-started')
+  expect(marks.length).toBe(1)
+  const [, verb, sessionFlag, sessionId, startedFlag, instant, promptFlag, promptValue] = marks[0]!
+  expect([verb, sessionFlag, sessionId, startedFlag, promptFlag, promptValue]).toEqual([
+    'turn-started',
+    '--session',
+    'sess-1',
+    '--started-at',
+    '--prompt-id',
+    'prompt-1',
+  ])
+  expect(new Date(instant!).toISOString()).toBe(instant)
+  expect(Date.parse(instant!)).toBeGreaterThanOrEqual(beforeMs)
+  expect(Date.parse(instant!)).toBeLessThanOrEqual(afterMs)
+
+  await $.turn.start({ text: 'sub', turnId: 't2', agentId: 'agent-1' })
+  await flush()
+  expect(argvs.filter((argv) => argv[1] === 'turn-started').length).toBe(1)
+
+  promptId = undefined
+  await $.turn.start({ text: 'again', turnId: 't3' })
+  await flush()
+  const later = argvs.filter((argv) => argv[1] === 'turn-started')
+  expect(later.length).toBe(2)
+  expect(later[1]).not.toContain('--prompt-id')
+})
+
+test('a failed-turn entry is submitted on a usable read and held when a turn started during the check', async ($, on) => {
+  const clock = mock.clock(on)
+  mock.store(on)
+  let isFirst = true
+  const submitted: string[] = []
+  const entry = '[turn] failed-turn server_error at 2026-01-01T00:00:00.000Z: cut off.'
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  on('session.id', () => answer('sess-1'))
+  on('turn.start', ($, e) => ({ turnId: e.turnId }))
+  on('turn.complete', () => ({ text: '' }))
+  on('process.run', async (_ctx, e) => {
+    if (e.argv[1] !== 'check') {
+      return answer({ exitCode: 0, stdout: '', stderr: '' })
+    }
+
+    if (isFirst) {
+      isFirst = false
+      await $.turn.start({ text: 'hi', turnId: 't1' })
+      await $.turn.complete({
+        reason: 'answer',
+        answer: '',
+        durationMs: 0,
+        isAborted: false,
+        turnId: 't1',
+      })
+    }
+
+    return answer({ exitCode: 0, stdout: `${entry}\n`, stderr: '' })
+  })
+  on('prompt.submit', ($, e) => {
+    submitted.push(e.text)
+    return { text: e.text }
+  })
+  await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+
+  await clock.advance(CHECK_MS)
+  expect(submitted).toEqual([])
+
+  await clock.advance(CHECK_MS)
+  expect(submitted).toEqual([entry])
+})
+
+test('a failed-turn entry is held when a turn starts while the delivered list is read', async ($, on) => {
+  const clock = mock.clock(on)
+  let isFirst = true
+  const submitted: string[] = []
+  const entry = '[turn] failed-turn server_error at 2026-01-01T00:00:00.000Z: cut off.'
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  on('session.id', () => answer('sess-1'))
+  on('turn.start', ($, e) => ({ turnId: e.turnId }))
+  on('turn.complete', () => ({ text: '' }))
+  on('store.get', async () => {
+    if (isFirst) {
+      isFirst = false
+      await $.turn.start({ text: 'hi', turnId: 't1' })
+      await $.turn.complete({
+        reason: 'answer',
+        answer: '',
+        durationMs: 0,
+        isAborted: false,
+        turnId: 't1',
+      })
+    }
+
+    return answer(undefined)
+  })
+  on('store.set', () => answer(undefined))
+  on('process.run', () => answer({ exitCode: 0, stdout: `${entry}\n`, stderr: '' }))
+  on('prompt.submit', ($, e) => {
+    submitted.push(e.text)
+    return { text: e.text }
+  })
+  await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+
+  await clock.advance(CHECK_MS)
+  expect(submitted).toEqual([])
+
+  await clock.advance(CHECK_MS)
+  expect(submitted).toEqual([entry])
+})
+
+test('a failed-turn entry is split from a team entry and repeats until a turn starts', async ($, on) => {
+  const clock = mock.clock(on)
+  mock.store(on)
+  let isFirst = true
+  const submitted: string[] = []
+  const turnEntry = '[turn] failed-turn server_error at 2026-01-01T00:00:00.000Z: cut off.'
+  const teamEntry = '[team] dead-teammate impl — gone'
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  on('session.id', () => answer('sess-1'))
+  on('turn.start', ($, e) => ({ turnId: e.turnId }))
+  on('turn.complete', () => ({ text: '' }))
+  on('process.run', async (_ctx, e) => {
+    if (e.argv[1] !== 'check') {
+      return answer({ exitCode: 0, stdout: '', stderr: '' })
+    }
+
+    if (isFirst) {
+      isFirst = false
+      await $.turn.start({ text: 'hi', turnId: 't1' })
+      await $.turn.complete({
+        reason: 'answer',
+        answer: '',
+        durationMs: 0,
+        isAborted: false,
+        turnId: 't1',
+      })
+    }
+
+    return answer({ exitCode: 0, stdout: `${teamEntry}\n${turnEntry}\n`, stderr: '' })
+  })
+  on('prompt.submit', ($, e) => {
+    submitted.push(e.text)
+    return { text: e.text }
+  })
+  await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+
+  await clock.advance(CHECK_MS)
+  expect(submitted).toEqual([teamEntry])
+
+  await clock.advance(CHECK_MS)
+  expect(submitted[1]).toBe(`${teamEntry}\n${turnEntry}`)
+
+  await clock.advance(CHECK_MS)
+  expect(submitted[2]).toBe(`${teamEntry}\n${turnEntry}`)
 })
 
 test('a rejected turn-start clear neither fails the turn nor goes unhandled', async ($, on) => {
@@ -531,5 +710,5 @@ test('a rejected turn-start clear neither fails the turn nor goes unhandled', as
   await $.turn.start({ text: 'hi', turnId: 't1' })
   await new Promise((resolve) => setTimeout(resolve, 10))
 
-  expect(clears).toBe(1)
+  expect(clears).toBe(2)
 })

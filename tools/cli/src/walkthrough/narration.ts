@@ -1,5 +1,6 @@
 import type { SpawnSyncReturns } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
+import { basename, dirname, join } from 'node:path'
 
 // What every walkthrough voice shares (FLOW-437): the narration a voice returns, the cache entry it
 // reads back, the timings it builds, and the interface it implements. voices.ts lists the voices.
@@ -44,8 +45,12 @@ export interface Voice {
   name: VoiceName
   // Only ElevenLabs charges by the character; it is what the summary's ttsCharacters counts.
   billsPerCharacter: boolean
+  // The extension of the audio file narrate returns, and so of each scene's file in the out dir.
+  audioExtension: '.mp3' | '.m4a'
   // Why this voice can't narrate, checked before the script is prepared; undefined when it can.
   problem(): VoiceProblem | undefined
+  // Whether narrate takes this scene from the cache. Reads only: no network, no process, no write.
+  isCached(scene: SceneText, cacheDir: string): boolean
   // One narration per scene, in order. Reuses the cache; throws VoiceError.
   narrate(scenes: SceneText[], cacheDir: string): Promise<Narration[]>
 }
@@ -141,3 +146,26 @@ export const isRecord = (value: unknown): value is Record<string, unknown> =>
 
 const isArrayOf = (value: unknown, type: 'string' | 'number'): boolean =>
   Array.isArray(value) && value.every((item) => typeof item === type)
+
+export const findCue = (
+  entries: string[],
+  cue: string,
+  from: number
+): { start: number; end: number } | undefined => {
+  for (let start = from; start < entries.length; start++) {
+    let spoken = ''
+    let end = start
+    while (end < entries.length && spoken.length < cue.length) {
+      spoken += entries[end]
+      end++
+    }
+    if (spoken.startsWith(cue)) {
+      return { start, end }
+    }
+  }
+  return undefined
+}
+
+// Narration audio is cached beside the script, whichever voice speaks it.
+export const cacheDirOf = (scriptFile: string): string =>
+  join(dirname(scriptFile), `${basename(scriptFile, '.json')}.cache`)

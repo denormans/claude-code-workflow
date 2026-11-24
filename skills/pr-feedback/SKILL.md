@@ -172,7 +172,9 @@ conversation comment from a bot), and `bot-comments-edited` (a bot rewrote a con
 had already posted — judge its **current** body; an id you processed before is not processed when
 its body has changed). Neither wake carries CodeRabbit's rate-limit or pause banner:
 those are read as a single status instead, and
-`CODERABBIT_RATE_LIMITED` / `CODERABBIT_PAUSED` fire only when that status *changes*. A rate-limit
+`CODERABBIT_RATE_LIMITED` / `CODERABBIT_PAUSED` fire when that status *changes*, and
+`CODERABBIT_RATE_LIMITED` also fires on a new refusal that states no reset time, whatever the
+status is. A rate-limit
 reading also wins over a pause, so a pause banner posted while a rate-limit banner still stands
 changes nothing and produces no event at all.
 
@@ -191,7 +193,7 @@ changes nothing and produces no event at all.
 3. Is there a reason for the current implementation?
 4. Does the reviewer understand the full context?
 
-**If suggestion seems wrong:** Push back with technical reasoning via a reply in the PR comment thread.
+**If suggestion seems wrong:** Push back with technical reasoning via a reply in the PR comment thread, recorded with `--ack-comment` (§Record a comment the monitor would otherwise wake you on).
 
 **If it conflicts with the user's prior decisions:** Ask the user before making changes.
 
@@ -256,7 +258,7 @@ hand back to the same check as case (a).
 
 **When feedback is wrong:**
 ```
-✅ Reply to the PR comment thread explaining why
+✅ Reply to the PR comment thread explaining why, and record the reply's id with `--ack-comment` (§Record a comment the monitor would otherwise wake you on)
 ✅ Use technical reasoning, reference working code/tests
 ✅ Ask specific questions if you're not sure
 ```
@@ -329,18 +331,25 @@ whole, or an answer spanning several files.
 ### Record a comment the monitor would otherwise wake you on
 
 **A reply into an existing review thread lands inside it,** at whatever index it has reached —
-never as a thread of its own. `toReviewThreads` reads only each thread's first comment
-(`comments(first: 1)`), so a reply landing at index 1+ is invisible to it: there is nothing to
-suppress, and nothing to do.
+never as a thread of its own. The monitor reads each thread's recent comments, so a reply you post
+there wakes the lead as `new-thread-replies`, and it is recorded like any other comment. The id
+comes from the mutation:
+
+```bash
+gh api graphql -f query='mutation($thread: ID!, $body: String!) {
+  addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: $thread, body: $body}) {
+    comment { id }
+  }
+}' -f thread="<thread-id>" -f body="<reply>" --jq '.data.addPullRequestReviewThreadReply.comment.id'
+
+pr-monitor --ack-comment "<id-printed-above>" --pr "<pr-number>" --repo "<owner/repo>"
+```
 
 **A comment that does not reply to an existing thread opens its own,** with that comment as the
 thread's first comment. The monitor cannot tell this apart from a reviewer's new finding by author —
 the human user and the automation share one GitHub account — so it would wake the lead to handle its
-own words. Whether a comment is suppressible is a property of which act produced it, not of how
-often either act happens: a thread you opened is suppressible; a reply into someone else's thread is
-never observed in the first place, so it would need no suppressing even if it were common.
-`--ack-comment` exists for the thread-opening case. Post the comment, then record the id GitHub
-returns on the same turn:
+own words. A thread you opened is suppressible by the same `--ack-comment`. Post the comment, then
+record the id GitHub returns on the same turn:
 
 ```bash
 gh api "repos/<owner/repo>/pulls/<pr-number>/comments" \

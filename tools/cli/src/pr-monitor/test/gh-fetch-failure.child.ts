@@ -6,12 +6,23 @@ import { fetchPrState } from '../gh.ts'
 
 // An optional fourth argument is a deadline in milliseconds from now, and adds the UNKNOWN reason.
 const [, , prNumber, repo, deadlineMs] = process.argv
-const result = fetchPrState(
-  prNumber,
-  repo,
-  deadlineMs === undefined ? undefined : Date.now() + Number(deadlineMs)
-)
+const deadlineAt = deadlineMs === undefined ? undefined : Date.now() + Number(deadlineMs)
+
+if (process.env.CONFIRM_FETCH === '1') {
+  // pollOnce's confirm fetch runs against the same absolute deadline as the first fetch.
+  console.log(fetchPrState(prNumber, repo, deadlineAt).prState)
+  console.log(fetchPrState(prNumber, repo, deadlineAt).prState)
+  process.exit(0)
+}
+
+const result = fetchPrState(prNumber, repo, deadlineAt)
 console.log(result.prState)
+if (process.env.REPORT_OPTIONAL_READS === '1') {
+  console.log(JSON.stringify([result.unreadRunChecks, result.reviewerWaitReadFailed]))
+}
+if (process.env.REPORT_REVIEWER_WAIT === '1') {
+  console.log(JSON.stringify([result.statedReviewerWait ?? null, result.untimedRefusal ?? null]))
+}
 if (deadlineMs !== undefined) {
   console.log(result.unknownReason)
 }

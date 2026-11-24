@@ -22,6 +22,7 @@ export interface TtsOptions {
 export const DEFAULT_VOICE_ID = 'vT7ssnLimZ4obHUM4HyN'
 export const MODEL_ID = 'eleven_multilingual_v2'
 export const SPEED = 1.1
+const AUDIO_EXTENSION = '.mp3'
 
 export class TtsError extends VoiceError {}
 
@@ -33,7 +34,7 @@ export const elevenLabsEntry: VoiceEntry = {
   tool: 'elevenlabs',
   use: 'ElevenLabs narration for walkthrough videos',
   onFailure:
-    'STOP and tell the user ElevenLabs is configured but walkthrough render cannot voice the narration. Do NOT fall back.',
+    'STOP and tell the user ElevenLabs is configured but the walkthrough narration cannot be voiced. Do NOT fall back.',
   fromEnv: ({ env, apiBase }) => {
     const apiKey = env.ELEVEN_LABS_API_KEY || undefined
 
@@ -49,12 +50,7 @@ export const elevenLabsEntry: VoiceEntry = {
 
 // Speaks `text`, or reuses the cached audio for the same voice, model, speed and text.
 export const narrate = async (text: string, options: TtsOptions): Promise<Narration> => {
-  const key = createHash('sha256')
-    .update(options.voiceId + MODEL_ID + SPEED + text)
-    .digest('hex')
-  const audioFile = join(options.cacheDir, `${key}.mp3`)
-  const entryFile = join(options.cacheDir, `${key}.json`)
-  const cached = readCached(entryFile, audioFile)
+  const { key, audioFile, entryFile, cached } = cacheEntryOf(text, options)
   if (cached !== undefined) {
     return { audioFile, alignment: cached, cached: true }
   }
@@ -62,15 +58,31 @@ export const narrate = async (text: string, options: TtsOptions): Promise<Narrat
   const { audio, alignment } = await synthesize(text, options)
   mkdirSync(options.cacheDir, { recursive: true })
   writeFileSync(audioFile, audio)
-  writeFileSync(entryFile, JSON.stringify({ audioFile: `${key}.mp3`, alignment }))
+  writeFileSync(entryFile, JSON.stringify({ audioFile: `${key}${AUDIO_EXTENSION}`, alignment }))
   return { audioFile, alignment, cached: false }
+}
+
+const cacheEntryOf = (
+  text: string,
+  options: TtsOptions
+): { key: string; audioFile: string; entryFile: string; cached: Alignment | undefined } => {
+  const key = createHash('sha256')
+    .update(options.voiceId + MODEL_ID + SPEED + text)
+    .digest('hex')
+  const audioFile = join(options.cacheDir, `${key}${AUDIO_EXTENSION}`)
+  const entryFile = join(options.cacheDir, `${key}.json`)
+
+  return { key, audioFile, entryFile, cached: readCached(entryFile, audioFile) }
 }
 
 // Voices the scenes one at a time; the cues don't matter, since ElevenLabs times every character.
 const elevenLabsVoice = (options: Omit<TtsOptions, 'cacheDir'>): Voice => ({
   name: 'elevenlabs',
   billsPerCharacter: true,
+  audioExtension: AUDIO_EXTENSION,
   problem: () => undefined,
+  isCached: ({ narration }, cacheDir) =>
+    cacheEntryOf(narration, { ...options, cacheDir }).cached !== undefined,
   narrate: async (scenes, cacheDir) => {
     const narrations: Narration[] = []
 

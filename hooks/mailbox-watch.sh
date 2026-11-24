@@ -9,9 +9,11 @@ INPUT=$(cat)
 if command -v jq >/dev/null 2>&1; then
   SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null) || SESSION_ID=""
   STOP_ACTIVE=$(echo "$INPUT" | jq -r '.stop_hook_active // false' 2>/dev/null) || STOP_ACTIVE="false"
+  PROMPT_ID=$(echo "$INPUT" | jq -r '.prompt_id // empty' 2>/dev/null) || PROMPT_ID=""
 else
   SESSION_ID=""
   STOP_ACTIVE="false"
+  PROMPT_ID=""
 fi
 
 # Records the background work this turn ended on, so the board shows the session waiting rather than
@@ -23,6 +25,12 @@ record_wait() {
 }
 
 [[ -z "$SESSION_ID" ]] && exit 0
+
+# A turn that reached Stop succeeded: on every Stop path it is recorded as succeeded and clears the
+# failed-turn record, unless its prompt is provably older than the failed one.
+PROMPT_ARGS=()
+[[ -n "$PROMPT_ID" ]] && PROMPT_ARGS=(--prompt-id "$PROMPT_ID")
+"${PLUGIN_ROOT}/bin/mailbox" turn-succeeded --session "$SESSION_ID" ${PROMPT_ARGS[@]+"${PROMPT_ARGS[@]}"} >/dev/null 2>&1 || true
 
 # Loop guard: if we're already resuming from a Stop hook, let the session stop.
 if [[ "$STOP_ACTIVE" == "true" ]]; then

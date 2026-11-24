@@ -10,11 +10,12 @@ import {
 } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { basename, dirname, extname, join } from 'node:path'
+import { extname, join } from 'node:path'
 import { setRequestedExitCode } from '../runtime-exit-code.ts'
 import { composeHtml, timeScenes } from './compose.ts'
 import {
   VoiceError,
+  cacheDirOf,
   type Alignment,
   type Narration,
   type Voice,
@@ -237,7 +238,7 @@ const copyNarrations = (
 }
 
 // The message to print when ffmpeg cannot run, or undefined when it can.
-const probeFfmpeg = (): string | undefined => {
+export const probeFfmpeg = (): string | undefined => {
   const probe = spawnSync('ffmpeg', ['-version'], { stdio: 'ignore' })
   const code = probe.error !== undefined && 'code' in probe.error ? probe.error.code : undefined
 
@@ -278,7 +279,3 @@ const hyperframes = (args: string[]): boolean => {
   }
   return true
 }
-
-// Narration audio is cached beside the script, whichever voice speaks it.
-const cacheDirOf = (scriptFile: string): string =>
-  join(dirname(scriptFile), `${basename(scriptFile, '.json')}.cache`)

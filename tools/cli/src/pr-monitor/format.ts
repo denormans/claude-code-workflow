@@ -23,4 +23,6 @@ const approvalInstructions: Partial<Record<ChangeType, string>> = {
     'run the PR Lifecycle CI_GREEN_ON_DRAFT handler (flush the deferred queue, check for open questions); it ends in a `dashboard item add --type approval` flip-to-ready item, never an info note. Withdraw any note already posted for it.',
   MERGE_READY:
     'run the PR Lifecycle MERGE_READY handler (flush the deferred queue, check for open questions, move the ticket to review, look up approvers); it ends in a `dashboard item add --type approval` merge item, never an info note. Withdraw any note already posted for it.',
+  'ci-green-awaiting-review':
+    'run the PR Lifecycle Bots satisfied check for this head; depending on what it finds it re-requests a missing review, stays parked on an unanswered post, or ends in a `dashboard item add --type approval` human-review item once its conditions hold.',
 }

@@ -28,8 +28,9 @@ const PARTIAL_EXIT = 3
 // A check prints one entry per wake reason, each opening with a source tag; it indents an answer's
 // continuation lines, so only an entry's first line can open with a tag. Entries split before a known
 // tag at the start of a line.
-const ENTRY_START = /\n(?=\[(?:dashboard|pr-monitor|renovate-pr-monitor|team)\] )/
+const ENTRY_START = /\n(?=\[(?:dashboard|pr-monitor|renovate-pr-monitor|team|turn)\] )/
 const RELEASED_ITEM = /^\[dashboard\] item (\S+) /
+const FAILED_TURN_ENTRY = /^\[turn\] /
 
 export const register: Register = (on) => {
   // Module memory, so a reload starts all of these at their initial value: the next turn.start sets
@@ -67,6 +68,33 @@ export const register: Register = (on) => {
             {
               timeoutMs: CLEAR_TIMEOUT_MS,
             }
+          )
+        )
+        .catch(() => undefined)
+
+      // Every turn start is recorded, so a failure that follows a start is not resumed over the
+      // user and a start later than a failure stops the failed-turn entry from printing again. The
+      // prompt id orders it against the failure; without one the start is marked under an id of its
+      // own. Not awaited; a failure is dropped.
+      void Promise.all([
+        $.session.id(),
+        $.session.info().then(
+          (info) => info.promptId,
+          () => undefined
+        ),
+      ])
+        .then(([sessionId, promptId]) =>
+          $.process.run(
+            [
+              `${$.plugin.root}/bin/mailbox`,
+              'turn-started',
+              '--session',
+              sessionId,
+              '--started-at',
+              turnStartedAt,
+              ...(promptId === undefined ? [] : ['--prompt-id', promptId]),
+            ],
+            { timeoutMs: CLEAR_TIMEOUT_MS }
           )
         )
         .catch(() => undefined)
@@ -139,13 +167,19 @@ export const register: Register = (on) => {
       // change is printed once and recorded as reported; a "could not be polled" line is never
       // recorded and repeats each check until the PR polls again.
       // Answer entries are re-printed until consumed, so a stale or unreliable read can wait.
+      const delivered = new Set(asStringArray(await $.store.get(deliveredKey)))
       const isAnswerReadUsable =
         (exitCode === 0 || exitCode === PARTIAL_EXIT) &&
         !isTurnRunning &&
         turnStarts === turnStartsBefore
-      const delivered = new Set(asStringArray(await $.store.get(deliveredKey)))
       const reportedIds = entries.flatMap((entry) => releasedItemId(entry) ?? [])
       const wake = entries.filter((entry) => {
+        // A failed-turn entry repeats until a turn starts, so like an answer it waits for a usable
+        // read and is never recorded as delivered.
+        if (FAILED_TURN_ENTRY.test(entry)) {
+          return isAnswerReadUsable
+        }
+
         const id = releasedItemId(entry)
         if (id === undefined) {
           return true

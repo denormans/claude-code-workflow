@@ -13,7 +13,16 @@ if [ -n "${GH_SLEEP_SECS:-}" ]; then
 fi
 
 if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
-  echo '{"state":"open","isDraft":false,"mergeable":"UNKNOWN","mergeStateStatus":"UNKNOWN","headRefOid":"abc123","comments":[]}'
+  echo '{"state":"open","isDraft":false,"mergeable":"UNKNOWN","mergeStateStatus":"UNKNOWN","headRefOid":"abc123","comments":'"${COMMENTS_JSON:-[]}"'}'
+  exit 0
+fi
+
+# RUN_SLEEP_SECS stands in for a hung workflow-run status read.
+if [ "$1" = "api" ] && [ "${2#repos/}" != "$2" ]; then
+  if [ -n "${RUN_SLEEP_SECS:-}" ]; then
+    exec sleep "$RUN_SLEEP_SECS"
+  fi
+  echo '{"status":"completed","attempt":1}'
   exit 0
 fi
 
@@ -48,6 +57,13 @@ if [ "$1" = "api" ] && [ "$2" = "graphql" ]; then
         exit 1
       fi
       echo '{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}}'
+      exit 0
+      ;;
+    *"node(id:"*)
+      if [ -n "${NODE_SLEEP_SECS:-}" ]; then
+        exec sleep "$NODE_SLEEP_SECS"
+      fi
+      echo '{"data":{"node":{"body":"Review rate limited. Next review available in 7 minutes","updatedAt":"2026-01-01T00:00:00Z"}}}'
       exit 0
       ;;
     *)

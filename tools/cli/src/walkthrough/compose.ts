@@ -10,7 +10,7 @@ import { bringIntoView, frame, union, type Size } from './camera.ts'
 import { isMessageIndex } from '../validate-mermaid/validate.ts'
 import type { PreparedScene } from './prepare.ts'
 import { captionsOf, type Caption } from './silent.ts'
-import type { Alignment } from './narration.ts'
+import { findCue, type Alignment } from './narration.ts'
 
 // Builds the HyperFrames composition (index.html) for a prepared script, narrated or silent. Every
 // reveal, highlight and camera move is a tween on one paused GSAP timeline; HyperFrames seeks it
@@ -130,25 +130,6 @@ const cueTimes = (scene: PreparedScene, alignment: Alignment, index: number): nu
     from = found.end
     return time
   })
-}
-
-const findCue = (
-  entries: string[],
-  cue: string,
-  from: number
-): { start: number; end: number } | undefined => {
-  for (let start = from; start < entries.length; start++) {
-    let spoken = ''
-    let end = start
-    while (end < entries.length && spoken.length < cue.length) {
-      spoken += entries[end]
-      end++
-    }
-    if (spoken.startsWith(cue)) {
-      return { start, end }
-    }
-  }
-  return undefined
 }
 
 const sceneHtml = (

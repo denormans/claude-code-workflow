@@ -48,7 +48,7 @@ export const silentMessage = (entries: readonly VoiceEntry[] = VOICES): string =
   'walkthrough is rendered without a voice, with the narration as subtitles.'
 
 // "A", "A or B", "A, B or C".
-const listOf = (names: string[]): string =>
+export const listOf = (names: string[]): string =>
   names.length <= 1
     ? names.join('')
     : `${names.slice(0, -1).join(', ')} or ${names[names.length - 1]}`

@@ -9,6 +9,15 @@ export const parseNonBlankString =
     return trimmed
   }
 
+// Like parseNonBlankString, but a value with content passes through byte for byte, for flags naming a
+// file or directory where trimming could select a different path.
+export const parseExactNonBlankString =
+  (flagName: string) =>
+  (value: string): string => {
+    if (value.trim().length === 0) throw new Error(`${flagName} must not be blank`)
+    return value
+  }
+
 // A git-sha-shaped string: 7-40 lowercase hex characters. Composes parseNonBlankString's blank
 // check rather than duplicating the trim — an unshaped value (too short, too long, uppercase, or
 // non-hex) corrupts reviewedShas for the same reason a blank one does, so it is rejected the same

@@ -21,10 +21,10 @@ covers:
 - Starting the monitor (`Bash(... run_in_background=true, timeout=2147483647, description=...)`)
 - Single-tick debug mode (`--once`, `--dry-run`, `--verbose`)
 - Configuration including `RENOVATE_MONITOR_EXCLUDE` (repos to skip), `RENOVATE_MONITOR_MERGE_DELAY_SECONDS` (inter-merge spacing), `RENOVATE_MONITOR_HOLD_FOR_HUMAN_PRS` (opt-in, off by default — hold merges while a human PR is open in the repo; bots incl. `*[bot]` like release-please are auto-excluded), `RENOVATE_MONITOR_HOLD_RELAX_HOURS`/`_TZ` (quiet window that suspends that hold, e.g. `0-8` `America/Chicago`), and `RENOVATE_MONITOR_BOT_AUTHORS` (rare fallback list for bots run under a plain user account)
-- The board: one node per monitor session, a board question at every stop, a node retitle for outcomes that decide nothing, and an info note for the `all-done` summary (invoke `workflow:board` for the protocol)
+- The board: one node per monitor session, a board question at every stop (a launch request for a major that needs code changes), a node retitle for outcomes that decide nothing, and an info note for the `all-done` summary (invoke `workflow:board` for the protocol)
 - The per-PR escalation events (`ci-failed`, `rebase-conflict`, `unknown`) and per-event remediation steps
 - How code-changing fixes (`ci-failed`, `rebase-conflict`) are handled: you diagnose the failure and write the fix plan, then a spawned teammate subagent (`workflow:implementer`) implements that plan and pushes it onto the Renovate branch
-- The `majors-for-review` event — major version bumps are never auto-merged; ask on the board, mark them notified, and restart
+- The `majors-for-review` event — major version bumps are never auto-merged; read the release notes, ask for a new session when one needs code changes or ask on the board otherwise, mark them notified, and restart
 - The session-summary event `all-done` — fires when routine work settled cleanly; retitle the node with the summary, post the summary as an info note, and restart the monitor
 - The growable **Mechanical fixes** section — add reusable repo-agnostic recipes there over time
 - State-file conventions

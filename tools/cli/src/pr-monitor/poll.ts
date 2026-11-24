@@ -240,8 +240,7 @@ export const preserveWatermarks = (previous: PrState, current: PrState): void =>
   // false on every fetch, so without this the event re-fires each restart. But a new
   // commit (a changed head SHA) is a fresh review cycle — e.g. a rework push after a
   // rejected flip-to-ready gate — so let the watermark reset there, allowing CI
-  // re-greening on the new head to re-emit CI_GREEN_ON_DRAFT. Mirrors the
-  // coderabbitThrottleCount reset-on-new-commit in compareStates.
+  // re-greening on the new head to re-emit CI_GREEN_ON_DRAFT.
   const headChanged =
     !!current.headSha && !!previous.headSha && current.headSha !== previous.headSha
   if (previous.ciGreenOnDraftFired && !headChanged) {

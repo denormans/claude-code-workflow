@@ -27,6 +27,7 @@ These skills form a pipeline. Each is a gate — always evaluated, but can self-
 | **PR Feedback** | `workflow:pr-feedback` | When the user asks about PR review comments | Yes — start here for PR reviews |
 | **PR Lifecycle** | `workflow:pr-lifecycle` | After senior review, to create PR and monitor it | Invoked by Team Dispatch |
 | **Process Improvement Notes** | `workflow:process-improvement-notes` | Track process observations during any workflow | Invoked by Team Dispatch; also on demand |
+| **Walkthrough Video** | `workflow:walkthrough-video` | Any narrated or walkthrough video: uses the configured voice, and the architecture conventions for an architecture doc's video and the scenes of any other video that show architecture | On demand; used by Architecture |
 | **Memory Review** | `workflow:memory-review` | Curate the persistent memory store at end-of-project — capture, reconcile, cull, promote — and route the user's review standards to the file the senior engineer reads | Invoked by Team Cleanup; also on demand |
 | **Team Cleanup** | `workflow:team-cleanup` | After PR merge, to clean up worktrees and team | Invoked by Team Dispatch |
 | **Board** | `workflow:board` | The shared dashboard protocol — session enter, questions, approvals, reconcile | No — invoked by the others |

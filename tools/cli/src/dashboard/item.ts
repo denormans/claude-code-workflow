@@ -140,6 +140,8 @@ export const runLaunchTitle = (session: string, title: string): void => {
   }
 }
 
+export type ApprovalKind = 'hold' | 'credential' | 'checkpoint' | 'launch'
+
 // add: post a question/approval item and record its id so the wake check knows a wait is pending and
 // reconcile can clear it — or post an info note, whose id is never recorded: nothing answers a note,
 // and the wake check and the Stop hook's gate read a non-empty openItemIds as "an answer can
@@ -158,7 +160,7 @@ export const runItemAdd = (
   opts: {
     session?: string
     key?: string
-    approvalKind?: 'hold' | 'credential' | 'checkpoint'
+    approvalKind?: ApprovalKind
     recommend?: string
     stalls?: string
     whyMine?: WhyMine
@@ -969,10 +971,7 @@ const infoNoteReminder = (itemId: string, sessionId: string): string =>
 // `approvalKind` is an enum, not free text — it supplies a missing fact the CLI cannot infer from
 // the prompt string, the same shape as `--key`; see
 // skills/board/references/dashboard-protocol.md §3.1 for why free text was rejected.
-const approvalIsAllowed = (
-  sessionId: string,
-  approvalKind: 'hold' | 'credential' | 'checkpoint' | undefined
-): boolean => {
+const approvalIsAllowed = (sessionId: string, approvalKind: ApprovalKind | undefined): boolean => {
   if (approvalKind !== undefined) return true
   // A DEFERRED question is an open question the board cannot see: it lives on local state until the
   // flush. §3.1 gates an advancement approval on open questions "deferred or not", so this is checked
@@ -1008,10 +1007,11 @@ const approvalIsAllowed = (
       `could change what they are advancing ` +
       `(skills/board/references/dashboard-protocol.md §3.1): they answer the question, ` +
       `then have to reject this and restate the answer.\n` +
-      `Wait for the answer, then post this. Only three kinds of approval are exempt: a HOLD ` +
+      `Wait for the answer, then post this. Only four kinds of approval are exempt: a HOLD ` +
       `(--approval-kind hold), a credential/auth/environment ask (--approval-kind credential), ` +
-      `or a checkpoint (--approval-kind checkpoint). There is no fourth exempt category — if this ` +
-      `is none of the three, it is an advancement approval, and the required action is the same ` +
+      `a checkpoint (--approval-kind checkpoint), or a request to start a separate session ` +
+      `(--approval-kind launch). There is no fifth exempt category — if this ` +
+      `is none of the four, it is an advancement approval, and the required action is the same ` +
       `as always: wait.\n`
   )
   setRequestedExitCode(1)
@@ -1342,7 +1342,7 @@ const recordPostedEntry = (
 // advancement-ness is DECLARED at post time via --approval-kind, and the board reports one
 // undifferentiated `approval` bucket with no way to read that declaration back. Inferring it from
 // prompt text is what §3.1 already rejected. So the message names both exits instead — withdraw an
-// advancement approval per §3.1's withdraw path, or answer and consume a credential/checkpoint ask.
+// advancement approval per §3.1's withdraw path, or answer and consume one of the exempt kinds.
 // A flush is never urgent (it happens at a PR boundary), so waiting is always available.
 //
 // Fails OPEN on every uncertain read, exactly like approvalIsAllowed: unreachable board,
@@ -1357,8 +1357,8 @@ const flushIsAllowed = (sessionId: string): boolean => {
       `alongside one asserting it is still being decided ` +
       `(skills/board/references/dashboard-protocol.md §3.1).\n` +
       `If it is an advancement approval, withdraw it first (\`dashboard item withdraw --item ` +
-      `"<id>"\`) and post a fresh one after the flush is answered. If it is a HOLD, a credential ask ` +
-      `or a checkpoint, answer and consume it first — this CLI cannot tell which it is, because ` +
+      `"<id>"\`) and post a fresh one after the flush is answered. If it is a HOLD, a credential ask, ` +
+      `a checkpoint or a launch request, answer and consume it first — this CLI cannot tell which it is, because ` +
       `--approval-kind is declared at post time and the board does not report it back.\n`
   )
   setRequestedExitCode(1)

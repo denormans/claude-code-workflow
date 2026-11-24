@@ -9,7 +9,7 @@ const mainTsPath = fileURLToPath(new URL('../main.ts', import.meta.url))
 
 const use = 'ElevenLabs narration for walkthrough videos'
 const onFailure =
-  'STOP and tell the user ElevenLabs is configured but walkthrough render cannot voice the narration. Do NOT fall back.'
+  'STOP and tell the user ElevenLabs is configured but the walkthrough narration cannot be voiced. Do NOT fall back.'
 
 const checkElevenlabs = (key: string) =>
   spawnSync(
@@ -80,7 +80,7 @@ test('CLI: check-tools reports mac-voice configured when WALKTHROUGH_MAC_VOICE i
     )
   const macUse = 'A macOS voice narrating walkthrough videos'
   const macOnFailure =
-    'STOP and tell the user a macOS voice is configured but walkthrough render cannot voice the narration with it. Do NOT fall back.'
+    'STOP and tell the user a macOS voice is configured but the walkthrough narration cannot be voiced with it. Do NOT fall back.'
 
   const configured = checkMacVoice('Samantha')
   assert.equal(configured.status, 0)
@@ -149,7 +149,7 @@ test('CLI: check-tools reports kokoro-voice configured when WALKTHROUGH_KOKORO_V
     )
   const kokoroUse = 'A local Kokoro voice narrating walkthrough videos'
   const kokoroOnFailure =
-    'STOP and tell the user a Kokoro voice is configured but walkthrough render cannot voice the narration with it. Do NOT fall back.'
+    'STOP and tell the user a Kokoro voice is configured but the walkthrough narration cannot be voiced with it. Do NOT fall back.'
 
   const configured = checkKokoro('af_heart')
   assert.equal(configured.status, 0)

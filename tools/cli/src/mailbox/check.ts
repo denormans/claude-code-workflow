@@ -14,6 +14,18 @@ import {
   recordTeammateDeathsReported,
   scanTeammateDeaths,
 } from './teammate-deaths.ts'
+import {
+  formatFailedTurn,
+  loadFailedTurn,
+  pendingResume,
+  releaseResolvedCheckpoint,
+  boardItemState,
+  boardNodeOf,
+  postBoardItem,
+  postIfNeeded,
+  retryStaleWithdraw,
+  withdrawBoardItem,
+} from './failed-turn.ts'
 
 // `mailbox check`: the wake mod's one call (hooks/wake.ts, FLOW-400). Runs every wake source once and
 // prints one entry per thing worth waking for, each opening with its `[source]` tag; empty stdout
@@ -39,6 +51,8 @@ const BUDGET_OVERRIDE_ENV = 'MAILBOX_CHECK_BUDGET_MS'
 // Held back from the PR reads for what runs after a PR's deadline: the store writes counting the
 // failure and unwatching the PR, each of which waits up to a second on the store lock.
 const TAIL_RESERVE_MS = 10_000
+// The failed-turn stage starts no board call once this share of the check budget has run.
+const FAILED_TURN_BUDGET_SHARE = 0.3
 
 export const runCheck = (session?: string): void => {
   const rawId = tryResolveRawSessionId(session)
@@ -66,6 +80,7 @@ export const runCheck = (session?: string): void => {
   }
   monitorDeaths(rawId)
   teammateDeaths(rawId)
+  failedTurn(rawId)
   pollPrs()
   if (answers.isPartial) {
     process.exitCode = PARTIAL_READ_EXIT
@@ -75,13 +90,17 @@ export const runCheck = (session?: string): void => {
 // `performance.timeOrigin` is the process start, so the budget includes node's own startup. It is
 // also the check's start, the anchor for the `--ack-ready` ack (see pollOnce).
 const pollPrs = (): void => {
-  const override = Number(process.env[BUDGET_OVERRIDE_ENV])
-  const totalMs = Number.isFinite(override) && override > 0 ? override : CHECK_TOTAL_BUDGET_MS
   pollWatched(
     undefined,
-    performance.timeOrigin + totalMs - TAIL_RESERVE_MS - Date.now(),
+    performance.timeOrigin + checkBudgetMs() - TAIL_RESERVE_MS - Date.now(),
     new Date(performance.timeOrigin).toISOString()
   )
+}
+
+const checkBudgetMs = (): number => {
+  const override = Number(process.env[BUDGET_OVERRIDE_ENV])
+
+  return Number.isFinite(override) && override > 0 ? override : CHECK_TOTAL_BUDGET_MS
 }
 
 // Which session ids to poll `answers --session <id>` against: every registered node for the raw
@@ -126,9 +145,7 @@ const releasedAnswers = (rawId: string): { entries: string[]; isPartial: boolean
     nodeIds = [rawId]
   }
 
-  const isRegistered =
-    nodeIds.length > 1 || nodeIds[0] !== anchor || loadState(anchor)?.registered === true
-  if (!isRegistered) {
+  if (!hasBoardNodes(nodeIds, anchor)) {
     return { entries: [], isPartial }
   }
 
@@ -164,6 +181,55 @@ const monitorDeaths = (rawId: string): void => {
   console.log(deaths.unreported.map(formatMonitorDeath).join('\n'))
   recordMonitorDeathsReported(deaths.all, rawId)
 }
+
+// Failed-turn recovery (FLOW-465): the entry is printed on every check while a resume is the answer
+// (no later turn is proven and the failure needs nothing from the user), so a lost print or a
+// rejected submit is repeated by the next check. A board item the hook could not post, a checkpoint
+// for a failure whose order could not be proven, and a withdraw a successful turn or a replaced item
+// could not make are retried here, and only board-registered sessions post or withdraw.
+const failedTurn = (rawId: string): void => {
+  const board = isBoardSession(rawId)
+  if (board) {
+    releaseResolvedCheckpoint(rawId)
+  }
+
+  const pending = pendingResume(rawId)
+  if (pending !== null) {
+    console.log(formatFailedTurn(pending))
+  }
+
+  const record = loadFailedTurn(rawId)
+  if (record !== null && board) {
+    const deadlineAt = performance.timeOrigin + checkBudgetMs() * FAILED_TURN_BUDGET_SHARE
+    postIfNeeded(
+      record,
+      postBoardItem(rawId),
+      boardItemState(rawId),
+      boardNodeOf(rawId),
+      true,
+      deadlineAt
+    )
+    retryStaleWithdraw(rawId, withdrawBoardItem(rawId), deadlineAt)
+  }
+}
+
+// Whether the session has entered the board. A registry that cannot be read is not a board session.
+export const isBoardSession = (rawId: string): boolean => {
+  try {
+    const anchor = resolveSessionId(rawId)
+
+    return hasBoardNodes(pollTargets(rawId, anchor), anchor)
+  } catch (error) {
+    if (!(error instanceof RegistryUnreadableError)) {
+      throw error
+    }
+
+    return false
+  }
+}
+
+const hasBoardNodes = (nodeIds: string[], anchor: string): boolean =>
+  nodeIds.length > 1 || nodeIds[0] !== anchor || loadState(anchor)?.registered === true
 
 // Teammate liveness (FLOW-358): a dead teammate leaves the lead waiting on a report or shutdown ack
 // that can never arrive. Printed before recorded, for the same reason as monitorDeaths.

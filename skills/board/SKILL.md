@@ -28,11 +28,13 @@ then mirror it to the terminal. With no board, `item add` exits 3 and prints the
 
 Post an approval before waiting for it. An **advancement approval** — one that asks the user to move the work forward (flip to ready-for-review, merge, proceed to the next phase; illustrative, not exhaustive) — is exclusive: never post one while a question that could change it is still open, hold it until that question resolves. If the question arrives **after** you already posted the approval, withdraw it (`dashboard item withdraw --item "<id>"`) rather than leaving it standing, and post a fresh one once the question resolves, with `--replaces "<id>"` naming the one you withdrew. Post it as your next action then — not later.
 
-Declare `--approval-kind` only on a HOLD item, a credential/auth/environment ask, or a checkpoint (a paused workflow with nothing to decide) — those are the only three approvals that are not advancement approvals. Declaring it on any other approval is **prohibited**, and never as a way past a refusal: if the CLI refuses, wait. Every approval that is not a HOLD, a credential ask, or a checkpoint is an advancement approval by construction.
+Declare `--approval-kind` only on a HOLD item, a credential/auth/environment ask, a checkpoint (a paused workflow with nothing to decide), or a request to start a separate session — those are the only four approvals that are not advancement approvals. Declaring it on any other approval is **prohibited**, and never as a way past a refusal: if the CLI refuses, wait. Every approval that is not a HOLD, a credential ask, a checkpoint, or a launch request is an advancement approval by construction.
 
 **When you are unsure, hold** — holding costs one board round-trip; posting early costs the user a rejection they must compose. Holding is never the more expensive mistake. **A post that succeeds proves nothing:** the CLI's guard fails open whenever it cannot get a trustworthy count — §3.1 enumerates the cases — so never treat "the CLI let me" as having performed the check. Two cases are always entangled, never judgement calls: any question about a PR's content, scope, or review findings while that PR is what advances; and a deferral-gate question.
 
 See §3 and §3.1 for the full argument and the fail-open analysis on the CLI's guard.
+
+**Starting a new session is a launch request.** Never start one without an approved `--approval-kind launch` item. When to ask, what the starting prompt must contain, which directory to propose and what to do with each answer: `references/starting-sessions.md`.
 
 ## 4. Reconcile by channel
 
@@ -65,6 +67,6 @@ anything that asks the user to approve, merge, flip, proceed or validate is `--t
 however the moment was reached and whether or not the step's own instructions are still in context.
 A note posted for one does not count as the step done; withdraw it
 (`dashboard item withdraw --item "<id>"`) and post the approval. Every `--type info` post's result
-carries this reminder in a `note` field. Three notes are prescribed, not judged: the Renovate monitor's `all-done` summary, the info-note reply that §6 prescribes where a board comment gets one, and the report of a ticket the workflow meant to move and could not. See §8.
+carries this reminder in a `note` field. Four notes are prescribed, not judged: a turn's final reply to the user, unless an item that turn posted already carries it or §8 says none is owed; the Renovate monitor's `all-done` summary; the info-note reply that §6 prescribes where a board comment gets one; and the report of a ticket the workflow meant to move and could not. **While a board is available, never respond to the user only in the terminal**, even with one word because the prompt asked for one. See §8.
 
 Full protocol: references/dashboard-protocol.md — read it before your first board action in a session.

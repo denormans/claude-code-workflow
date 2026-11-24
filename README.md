@@ -23,7 +23,7 @@ Everything below is needed for a run with no optional integration configured:
 - **git** and the **GitHub CLI (`gh`)**, signed in. The pull request steps use `gh`.
 - **jq.** The hooks use it to read their input.
 - **Python 3** (`python3`). The command-guard hooks use it to parse shell commands, and without it they let every command through. `bin/claude-sessions` is a Python script.
-- **ffmpeg** on `PATH`, and network access the first time a walkthrough video renders. Each architecture doc gets a walkthrough video, rendered with HyperFrames: `npx` fetches it, and it uses an installed Chrome or downloads one.
+- **ffmpeg** on `PATH`, and network access the first time a walkthrough video renders. Each architecture doc gets a walkthrough video, rendered with HyperFrames: `npx` fetches it, and it uses an installed Chrome or downloads one. The Walkthrough Video skill also needs ffmpeg, and HyperFrames when it renders with `walkthrough render`.
 
 ## Installation
 
@@ -59,7 +59,7 @@ None of these is required. Each one changes what the workflow does when it is pr
 |---|---|---|
 | Jira (an Atlassian MCP server, plus any `JIRA_*` or `ATLASSIAN_*` variable) | Work is tracked on a ticket, and branches are named after it | No ticket; branches are named from a short description |
 | Notion (a Notion MCP server, plus `NOTION_PAGE_URL`) | Design docs are published to Notion | Design docs stay as local files |
-| ElevenLabs (`ELEVEN_LABS_API_KEY`) | Each architecture doc's walkthrough video is narrated | The video is silent, with the narration as subtitles |
+| ElevenLabs (`ELEVEN_LABS_API_KEY`) | Each walkthrough video, including each architecture doc's, is narrated | The video is silent, with the narration as subtitles |
 | A macOS voice (`WALKTHROUGH_MAC_VOICE`) | The walkthrough video is narrated by that voice, when ElevenLabs isn't configured | With `ELEVEN_LABS_API_KEY` unset, Kokoro narrates it if `WALKTHROUGH_KOKORO_VOICE` is set; otherwise the video is silent, with the narration as subtitles |
 | A Kokoro voice (`WALKTHROUGH_KOKORO_VOICE`) | The walkthrough video is narrated by that local voice, when neither ElevenLabs nor a macOS voice is configured | With the other two unset as well, the video is silent, with the narration as subtitles |
 | The board (`ai-workflow-app`) | Questions and approvals go to the board | The workflow asks in the terminal |
@@ -93,10 +93,10 @@ These are Claude Code's own settings. The workflow depends on what they do.
 |---|---|
 | `JIRA_*`, `ATLASSIAN_*` | Any variable whose name starts with either prefix and whose value is not blank turns Jira on. What the value says doesn't matter. Unset: no tickets. |
 | `NOTION_PAGE_URL` | The Notion page design docs are published under. Unset: design docs stay as local files. |
-| `ELEVEN_LABS_API_KEY` | ElevenLabs API key used to narrate an architecture doc's walkthrough video. Unset: a macOS voice narrates it if `WALKTHROUGH_MAC_VOICE` is set, else a Kokoro voice if `WALKTHROUGH_KOKORO_VOICE` is; otherwise the video is silent, with the narration as subtitles. |
+| `ELEVEN_LABS_API_KEY` | ElevenLabs API key used to narrate walkthrough videos, an architecture doc's among them. Unset: a macOS voice narrates it if `WALKTHROUGH_MAC_VOICE` is set, else a Kokoro voice if `WALKTHROUGH_KOKORO_VOICE` is; otherwise the video is silent, with the narration as subtitles. |
 | `ELEVEN_LABS_VOICE_ID` | The ElevenLabs voice for that narration. Default: the voice the CLI pins. |
 | `WALKTHROUGH_MAC_VOICE` | A macOS voice, named as `say -v '?'` lists it, that narrates the walkthrough video when `ELEVEN_LABS_API_KEY` is unset. Unset (and `ELEVEN_LABS_API_KEY` unset too): a Kokoro voice narrates it if `WALKTHROUGH_KOKORO_VOICE` is set; otherwise the video is silent, with the narration as subtitles. Premium voices (System Settings → Accessibility → Read & Speak → System voice → Manage Voices…; Spoken Content before macOS 26) sound far better than the built-in ones. |
-| `WALKTHROUGH_KOKORO_VOICE` | A Kokoro speaker, such as `af_heart`, that narrates the walkthrough video locally and for free when neither `ELEVEN_LABS_API_KEY` nor `WALKTHROUGH_MAC_VOICE` is set. Only American (`a…`) and British (`b…`) English speakers can be used; the list is [Kokoro's VOICES.md](https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md). Needs [uv](https://docs.astral.sh/uv/) (`brew install uv`). The first render downloads the model and its Python packages, about 2 GB and 6 minutes, measured on one cold run in October 2026; later renders reuse them and work offline. |
+| `WALKTHROUGH_KOKORO_VOICE` | A Kokoro speaker, such as `af_heart`, that narrates the walkthrough video locally and for free when neither `ELEVEN_LABS_API_KEY` nor `WALKTHROUGH_MAC_VOICE` is set. Only American (`a…`) and British (`b…`) English speakers can be used; the list is [Kokoro's VOICES.md](https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md). Needs [uv](https://docs.astral.sh/uv/) (`brew install uv`). The first narrated run, whether `walkthrough render` or `walkthrough narrate`, downloads the model and its Python packages, about 2 GB and 6 minutes, measured on one cold run in October 2026; later runs reuse them and work offline. |
 | `AI_WORKFLOW_APP_BIN` | Path to the board's `ai-workflow-app` binary. Default: `ai-workflow-app` found on `PATH`. If the path you give does not exist, the board is treated as absent; `PATH` is not searched instead. |
 | `PERMISSION_HOLD_DEADLINE_S` | When a tool call needs permission, the prompt is also posted to the board, and whichever answer comes first wins. This is how many seconds the board side waits. Default: `570`. A value that is not a whole number below `600` uses the default. |
 | `PERMISSION_POLL_INTERVAL_S` | Seconds between checks for the board's answer to that prompt. Default: `3`. |
@@ -142,6 +142,7 @@ Only someone running the plugin's own test suite needs these.
 |---|---|
 | `TEST_CONCURRENCY` | How many test workers `pnpm test` runs at once. Default: a cap of at most 4, worked out from the machine's size. An explicit value is used as given. |
 | `DASHBOARD_INVOKE_TIMEOUT_MS` | Milliseconds each call to the board binary may take. Default: `5000`; the test script sets `30000`. |
+| `DASHBOARD_OPEN_TIMEOUT_MS` | Milliseconds `dashboard session launch` waits for `open` to hand the link to the Agent Session handler before it kills `open` and reports an unknown outcome. Default: `10000`. |
 | `MAILBOX_CHECK_BUDGET_MS` | Replaces the session check's 100-second time budget. Used by tests only. |
 
 ## Workflow stage hooks

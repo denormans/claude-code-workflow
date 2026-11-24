@@ -44,13 +44,16 @@ const withCoderabbit = (status: CoderabbitStatus, overrides: Partial<PrState> = 
 })
 
 test('none to rate-limited emits CODERABBIT_RATE_LIMITED with occurrence 1', () => {
-  const prev = withCoderabbit('none')
-  const curr = withCoderabbit('rate-limited', { coderabbitCooloffMinutes: 34 })
-  const changes = compareStates(prev, curr)
+  const prev = withStatedWait(undefined, 0)
+  const curr = withStatedWait(stated('c1', 0, 34 * 60), 0, {
+    coderabbitStatus: 'rate-limited',
+    coderabbitCooloffMinutes: 34,
+  })
+  const changes = compareStates(prev, curr, [], false, T0 + MINUTE_MS)
   const evt = changes.find((c) => c.type === 'CODERABBIT_RATE_LIMITED')
   assert.ok(evt, 'expected a CODERABBIT_RATE_LIMITED event')
   assert.match(evt.detail, /occurrence 1/)
-  assert.match(evt.detail, /~34m/)
+  assert.match(evt.detail, /next review available at 2026-01-01T00:34:00.000Z/)
   assert.equal(curr.coderabbitThrottleCount, 1)
 })
 
@@ -74,21 +77,30 @@ test('repeated throttles on the same commit accumulate the occurrence count', ()
   assert.equal(curr.coderabbitThrottleCount, 4)
 })
 
-test('a new headSha resets the throttle count', () => {
+test('a new headSha keeps counting, so the next transition is never a duplicate', () => {
   const prev = withCoderabbit('none', { coderabbitThrottleCount: 3, headSha: 'old' })
   const curr = withCoderabbit('rate-limited', { coderabbitCooloffMinutes: 10, headSha: 'new' })
   const evt = compareStates(prev, curr).find((c) => c.type === 'CODERABBIT_RATE_LIMITED')
   assert.ok(evt, 'expected a CODERABBIT_RATE_LIMITED event')
-  assert.match(evt.detail, /occurrence 1/)
-  assert.equal(curr.coderabbitThrottleCount, 1)
+  assert.match(evt.detail, /occurrence 4/)
+  assert.equal(curr.coderabbitThrottleCount, 4)
+
+  const reread = withCoderabbit('rate-limited', { headSha: 'new', coderabbitThrottleCount: 0 })
+  assert.deepEqual(
+    compareStates(curr, reread).filter((c) => c.type === 'CODERABBIT_RATE_LIMITED'),
+    [],
+    'a re-read repeated the event'
+  )
+  assert.equal(reread.coderabbitThrottleCount, 4, 'the count was not carried')
 })
 
-test('unknown cooloff still emits with a fallback note', () => {
+test('an unstated cooloff still emits, and names no fallback wait', () => {
   const prev = withCoderabbit('none')
   const curr = withCoderabbit('rate-limited', { coderabbitCooloffMinutes: null })
   const evt = compareStates(prev, curr).find((c) => c.type === 'CODERABBIT_RATE_LIMITED')
   assert.ok(evt, 'expected a CODERABBIT_RATE_LIMITED event')
-  assert.match(evt.detail, /cooloff unknown/)
+  assert.match(evt.detail, /no reset time stated/)
+  assert.doesNotMatch(evt.detail, /fallback/)
 })
 
 test('none to paused emits CODERABBIT_PAUSED', () => {
@@ -188,6 +200,637 @@ const readyGreenClean = (reviews: PrState['reviews']): PrState => ({
   reviews,
 })
 
+// --- FLOW-464: a green PR awaiting review, and a failure on a new commit ---
+
+const awaitingReview = (overrides: Partial<PrState> = {}): PrState => ({
+  ...cleanBaseline(),
+  isDraft: false,
+  ciChecks: { ci: 'success' },
+  headSha: 'abcdef1234',
+  ...overrides,
+})
+
+const awaitingReviewFired = (previous: PrState, current: PrState): boolean =>
+  compareStates(previous, current).some((c) => c.type === 'ci-green-awaiting-review')
+
+test('ci-green-awaiting-review fires once per head', () => {
+  const pending = awaitingReview({ ciChecks: { ci: 'pending' } })
+  const green = awaitingReview()
+  assert.equal(awaitingReviewFired(pending, green), true)
+  assert.equal(green.ciGreenAwaitingReviewHead, 'abcdef1234')
+
+  assert.equal(awaitingReviewFired(green, awaitingReview()), false, 'same head re-fired')
+
+  const nextHead = awaitingReview({ headSha: 'fedcba9876' })
+  assert.equal(awaitingReviewFired(green, nextHead), true, 'a new head did not re-fire')
+  assert.equal(nextHead.ciGreenAwaitingReviewHead, 'fedcba9876')
+})
+
+test('ci-green-awaiting-review stays silent for a draft, unread checks and a merge-ready PR', () => {
+  const pending = awaitingReview({ ciChecks: { ci: 'pending' } })
+  const review = (state: string): PrState['reviews'] => [
+    { author: 'alice', authorType: 'User', state },
+  ]
+  assert.equal(awaitingReviewFired(pending, awaitingReview({ isDraft: true })), false, 'draft')
+  assert.equal(
+    awaitingReviewFired(
+      pending,
+      awaitingReview({ reviews: review('APPROVED'), mergeStateStatus: 'CLEAN' })
+    ),
+    false,
+    'merge-ready is MERGE_READY, not this event'
+  )
+  assert.equal(
+    awaitingReviewFired(pending, awaitingReview({ ciChecksFetchFailed: true })),
+    false,
+    'unread checks'
+  )
+})
+
+test('ci-green-awaiting-review fires despite a standing review while the PR is not ready to merge', () => {
+  const pending = awaitingReview({ ciChecks: { ci: 'pending' } })
+  const review = (state: string): PrState['reviews'] => [
+    { author: 'alice', authorType: 'User', state, commitId: 'old1' },
+  ]
+  const openThread = [{ path: 'a.ts', line: 1, isResolved: false }]
+  assert.equal(
+    awaitingReviewFired(
+      pending,
+      awaitingReview({ reviews: review('CHANGES_REQUESTED'), unresolvedThreads: openThread })
+    ),
+    true,
+    'a standing CHANGES_REQUESTED with its threads still open stayed silent'
+  )
+  assert.equal(
+    awaitingReviewFired(
+      pending,
+      awaitingReview({ reviews: review('APPROVED'), mergeStateStatus: 'BLOCKED' })
+    ),
+    true,
+    'an approval on a PR that is not CLEAN stayed silent'
+  )
+  assert.equal(
+    awaitingReviewFired(pending, awaitingReview({ reviews: review('DISMISSED') })),
+    true,
+    'a dismissed review leaves the PR awaiting review'
+  )
+})
+
+test('a check failing on the old head and again on a new head emits CI_FAILURE both times', () => {
+  const failing = (headSha: string): PrState =>
+    awaitingReview({ ciChecks: { ci: 'failure' }, headSha })
+  const failures = (previous: PrState, current: PrState): number =>
+    compareStates(previous, current).filter((c) => c.type === 'CI_FAILURE').length
+
+  assert.equal(failures(awaitingReview({ ciChecks: { ci: 'pending' } }), failing('abcdef1234')), 1)
+  assert.equal(failures(failing('abcdef1234'), failing('abcdef1234')), 0, 'unchanged re-emitted')
+  assert.equal(failures(failing('abcdef1234'), failing('fedcba9876')), 1, 'new head stayed silent')
+})
+
+// --- FLOW-464: a reply inside a known thread ---
+
+const withReplies = (threads: PrState['threadComments']): PrState => ({
+  ...cleanBaseline(),
+  threadComments: threads,
+})
+
+test('new-thread-replies fires for a reply from someone else, resolved thread included', () => {
+  const before = withReplies([{ firstCommentId: 't1', path: 'a.ts', replyIds: ['r1'] }])
+  const after = withReplies([{ firstCommentId: 't1', path: 'a.ts', replyIds: ['r1', 'r2'] }])
+  const evt = compareStates(before, after).find((c) => c.type === 'new-thread-replies')
+  assert.equal(evt?.detail, 'New replies in 1 existing review thread in: a.ts')
+})
+
+test('new-thread-replies stays silent for own replies, unknown threads and a missing baseline', () => {
+  const before = withReplies([{ firstCommentId: 't1', path: 'a.ts', replyIds: ['r1'] }])
+  const replied = withReplies([
+    { firstCommentId: 't1', path: 'a.ts', replyIds: ['r1', 'mine'] },
+    { firstCommentId: 't2', path: 'b.ts', replyIds: ['x1'] },
+  ])
+  const fired = (previous: PrState, selfIds: string[] = []): boolean =>
+    compareStates(previous, replied, selfIds).some((c) => c.type === 'new-thread-replies')
+  assert.equal(fired(before, ['mine']), false, 'own reply or a thread absent from previous woke')
+  assert.equal(fired(withReplies(undefined)), false, 'a previous with no threadComments woke')
+  assert.equal(fired(before), true, 'control: the same reply is not self-recorded')
+})
+
+test('a reply that slides into the capped window is not new, a reply after the known ones is', () => {
+  const ids = (from: number, to: number): string[] =>
+    Array.from({ length: to - from + 1 }, (_, i) => `r${from + i}`)
+  const thread = (replyIds: string[]) =>
+    withReplies([{ firstCommentId: 't1', path: 'a.ts', replyIds }])
+  const fired = (previous: PrState, current: PrState, selfIds: string[] = []): boolean =>
+    compareStates(previous, current, selfIds).some((c) => c.type === 'new-thread-replies')
+
+  const saved = thread(ids(6, 25))
+  assert.equal(fired(saved, thread(ids(5, 24))), false, 'a deleted reply woke the session')
+  assert.equal(
+    fired(saved, thread([...ids(7, 24), 'r26'])),
+    true,
+    'a new reply after r24 was missed'
+  )
+  assert.equal(fired(saved, thread([...ids(7, 24), 'mine']), ['mine']), false, 'own reply woke')
+  assert.equal(fired(saved, thread(ids(30, 49))), true, 'no known id in the window: all are new')
+  assert.equal(fired(saved, thread(ids(6, 25))), false, 'control: nothing changed')
+
+  const between = thread(['r1', 'r3'])
+  assert.equal(
+    fired(between, thread(['r1', 'late', 'r3'])),
+    true,
+    'a reply listed between two known'
+  )
+})
+
+test('the thread-reply and awaiting-review baselines survive the store round-trip', () => {
+  withIsolatedStore('flow-464-baselines-roundtrip', () => {
+    mkdirSync(storeDir(), { recursive: true })
+    saveState('7', 'owner/repo', {
+      ...withReplies([{ firstCommentId: 't1', path: 'a.ts', replyIds: ['r1'] }]),
+      ciGreenAwaitingReviewHead: 'abc',
+    })
+    const loaded = loadState('7', 'owner/repo')
+    assert.deepEqual(loaded?.threadComments, [
+      { firstCommentId: 't1', path: 'a.ts', replyIds: ['r1'] },
+    ])
+    assert.equal(loaded?.ciGreenAwaitingReviewHead, 'abc')
+  })
+})
+
+// --- FLOW-464: a verdict left on an older commit ---
+
+const staleReview = (overrides: Partial<PrState> = {}): PrState => ({
+  ...awaitingReview(),
+  reviews: [{ author: 'bob', authorType: 'User', state: 'CHANGES_REQUESTED', commitId: 'old1' }],
+  ...overrides,
+})
+
+const staleFired = (previous: PrState, current: PrState): boolean =>
+  compareStates(previous, current).some((c) => c.type === 'stale-review-blocking')
+
+test('stale-review-blocking fires once per head when only an older-commit verdict blocks', () => {
+  const quiet = awaitingReview({ reviews: [] })
+  const stale = staleReview()
+  assert.equal(staleFired(quiet, stale), true)
+  assert.equal(stale.staleReviewHead, 'abcdef1234')
+  assert.equal(staleFired(stale, staleReview()), false, 'same head re-fired')
+  assert.equal(staleFired(stale, staleReview({ headSha: 'fedcba9876' })), true, 'new head silent')
+
+  const detail = (current: PrState): string | undefined =>
+    compareStates(quiet, current).find((c) => c.type === 'stale-review-blocking')?.detail
+  assert.doesNotMatch(detail(staleReview()) ?? '', /behind/)
+  assert.match(detail(staleReview()) ?? '', /CHANGES_REQUESTED review is left on an older commit/)
+  assert.match(
+    detail(staleReview({ mergeStateStatus: 'BEHIND' })) ?? '',
+    /older commit than abcdef1.*; the branch is also behind its base/,
+    'a behind branch was not named, or the event was dropped for it'
+  )
+})
+
+test('stale-review-blocking stays silent when anything else blocks or the verdict is current', () => {
+  const quiet = awaitingReview({ reviews: [] })
+  const review = (commitId?: string): PrState['reviews'] => [
+    { author: 'bob', authorType: 'User', state: 'CHANGES_REQUESTED', commitId },
+  ]
+  assert.equal(staleFired(quiet, staleReview({ reviews: review('abcdef1234') })), false, 'on head')
+  assert.equal(staleFired(quiet, staleReview({ reviews: review(undefined) })), false, 'no commit')
+  assert.equal(
+    staleFired(
+      quiet,
+      staleReview({ unresolvedThreads: [{ path: 'a.ts', line: 1, isResolved: false }] })
+    ),
+    false,
+    'open thread'
+  )
+  assert.equal(staleFired(quiet, staleReview({ ciChecks: { ci: 'failure' } })), false, 'red check')
+  assert.equal(staleFired(quiet, staleReview({ isDraft: true })), false, 'draft')
+  assert.equal(staleFired(quiet, staleReview()), true, 'control: the same state fires unaltered')
+})
+
+test('a review commitId survives the store round-trip', () => {
+  withIsolatedStore('flow-464-commit-id-roundtrip', () => {
+    mkdirSync(storeDir(), { recursive: true })
+    saveState('7', 'owner/repo', { ...staleReview(), staleReviewHead: 'abcdef1234' })
+    const loaded = loadState('7', 'owner/repo')
+    assert.equal(loaded?.reviews[0]?.commitId, 'old1')
+    assert.equal(loaded?.staleReviewHead, 'abcdef1234')
+  })
+})
+
+// --- FLOW-464: a check whose workflow run has ended ---
+
+const withStuck = (
+  stuckChecks: PrState['stuckChecks'],
+  headSha = 'abcdef1234',
+  overrides: Partial<PrState> = {}
+): PrState => ({
+  ...awaitingReview({ ciChecks: { ci: 'pending' }, headSha }),
+  stuckChecks,
+  ...overrides,
+})
+
+const stuckEvents = (previous: PrState, current: PrState): string[] =>
+  compareStates(previous, current)
+    .filter((c) => c.type === 'check-stuck')
+    .map((c) => c.detail)
+
+const ciRun = (attempt: number, runId = '77') => [{ name: 'ci', runId, attempt }]
+
+test('check-stuck fires when newly stuck, not again on one head, and again on a new head', () => {
+  assert.deepEqual(stuckEvents(withStuck([]), withStuck(ciRun(1))), [
+    'Check still in progress although the workflow run has completed: ci (run 77, attempt 1)',
+  ])
+  assert.deepEqual(stuckEvents(withStuck(ciRun(1)), withStuck(ciRun(1))), [], 'same head re-fired')
+  assert.deepEqual(stuckEvents(withStuck(undefined), withStuck([])), [], 'nothing stuck fired')
+  assert.equal(
+    stuckEvents(withStuck(ciRun(1)), withStuck(ciRun(1), 'fedcba9876')).length,
+    1,
+    'a new head did not re-report'
+  )
+})
+
+test('a re-run that ends stuck again reports again, and a saved entry without an attempt does not', () => {
+  assert.equal(
+    stuckEvents(withStuck(ciRun(1)), withStuck(ciRun(2))).length,
+    1,
+    'a new attempt of the same run stayed silent'
+  )
+  assert.equal(stuckEvents(withStuck(ciRun(1)), withStuck(ciRun(1, '78'))).length, 1, 'a new run')
+
+  assert.deepEqual(stuckEvents(withStuck(ciRun(0)), withStuck(ciRun(2))), [], 'no-attempt entry')
+  assert.deepEqual(stuckEvents(withStuck(ciRun(0, '')), withStuck(ciRun(2))), [], 'no-run entry')
+  assert.equal(
+    stuckEvents(withStuck(ciRun(0)), withStuck(ciRun(2, '78'))).length,
+    1,
+    'a different run matched a saved entry'
+  )
+
+  const next = withStuck(ciRun(2))
+  stuckEvents(withStuck(ciRun(0, '')), next)
+  assert.deepEqual(next.stuckChecks, ciRun(2), 'the full identity was not saved')
+})
+
+test('a check whose run could not be read keeps its stuck state instead of re-reporting', () => {
+  const ci = ciRun(1)
+  const unread = withStuck([], 'abcdef1234', { unreadRunChecks: [{ name: 'ci', runId: '77' }] })
+  assert.deepEqual(stuckEvents(withStuck(ci), unread), [], 'an unreadable run fired')
+  assert.deepEqual(unread.stuckChecks, ci, 'the unreadable run cleared the baseline')
+  assert.deepEqual(stuckEvents(unread, withStuck(ci)), [], 'the next good read re-reported it')
+
+  const failedFetch = withStuck([], 'abcdef1234', { ciChecksFetchFailed: true })
+  assert.deepEqual(stuckEvents(withStuck(ci), failedFetch), [])
+  assert.deepEqual(failedFetch.stuckChecks, ci, 'a failed checks read cleared the baseline')
+
+  const cleared = withStuck([])
+  assert.deepEqual(stuckEvents(withStuck(ci), cleared), [])
+  assert.deepEqual(cleared.stuckChecks, [], 'a check no longer stuck stayed in the baseline')
+})
+
+test('a failed read of one run keeps a same-named check stuck on another run', () => {
+  const both = [...ciRun(1, '1'), ...ciRun(1, '2')]
+  const oneUnread = withStuck(ciRun(1, '1'), 'abcdef1234', {
+    unreadRunChecks: [{ name: 'ci', runId: '2' }],
+  })
+  assert.deepEqual(stuckEvents(withStuck(both), oneUnread), [], 'a failed read fired')
+  assert.deepEqual(oneUnread.stuckChecks, both, 'the unread run was dropped from the baseline')
+  assert.deepEqual(stuckEvents(oneUnread, withStuck(both)), [], 'the next good read re-reported')
+
+  const legacy = withStuck([], 'abcdef1234', { unreadRunChecks: [{ name: 'ci', runId: '2' }] })
+  stuckEvents(withStuck(ciRun(0, '')), legacy)
+  assert.deepEqual(
+    legacy.stuckChecks,
+    ciRun(0, ''),
+    'an entry with no run id was not matched by name'
+  )
+})
+
+// --- FLOW-464: the reset time a reviewer states ---
+
+const MINUTE_MS = 60_000
+const T0 = Date.parse('2026-01-01T00:00:00Z')
+const at = (minutes: number): string => new Date(T0 + minutes * MINUTE_MS).toISOString()
+
+// A poll whose previous successful read was `readMinutes` after T0.
+const withStatedWait = (
+  statedReviewerWait: PrState['statedReviewerWait'],
+  readMinutes: number,
+  overrides: Partial<PrState> = {}
+): PrState => ({
+  ...cleanBaseline(),
+  timestamp: at(readMinutes),
+  statedReviewerWait,
+  ...overrides,
+})
+
+const stated = (commentId: string, updatedAtMinutes: number, seconds = 300) => ({
+  commentId,
+  updatedAt: at(updatedAtMinutes),
+  seconds,
+})
+
+const waitEvents = (previous: PrState, current: PrState, nowMinutes: number): string[] =>
+  compareStates(previous, current, [], false, T0 + nowMinutes * MINUTE_MS)
+    .filter((c) => c.type === 'reviewer-available')
+    .map((c) => c.detail)
+
+test('reviewer-available fires once, counted from the comment own edit time', () => {
+  const armed = withStatedWait(stated('c1', 0), 0)
+  assert.deepEqual(waitEvents(withStatedWait(undefined, 0), armed, 1), [], 'fired early')
+  assert.deepEqual(armed.reviewerWait, {
+    commentId: 'c1',
+    updatedAt: at(0),
+    availableAt: at(5),
+    fired: false,
+  })
+
+  const due = withStatedWait(stated('c1', 0), 1, { reviewerWait: armed.reviewerWait })
+  assert.deepEqual(waitEvents(armed, due, 5), [
+    "CodeRabbit's stated reset time (2026-01-01T00:05:00.000Z) has arrived",
+  ])
+  assert.equal(due.reviewerWait?.fired, true)
+
+  const later = withStatedWait(stated('c1', 0), 5, { reviewerWait: due.reviewerWait })
+  assert.deepEqual(waitEvents(due, later, 9), [], 'fired a second time')
+
+  const edited = withStatedWait(stated('c1', 8), 9, { reviewerWait: later.reviewerWait })
+  assert.deepEqual(waitEvents(later, edited, 9), [], 'an edit fired at once')
+  assert.equal(edited.reviewerWait?.availableAt, at(13))
+
+  const unstated = withStatedWait(undefined, 30, { reviewerWait: edited.reviewerWait })
+  assert.deepEqual(waitEvents(edited, unstated, 30), [], 'a cleared wait fired')
+  assert.equal(unstated.reviewerWait, undefined)
+})
+
+test('a reset already past at the previous read never fires, one that fell due since does', () => {
+  const old = withStatedWait(stated('c1', 0), 60)
+  assert.deepEqual(waitEvents(withStatedWait(undefined, 60), old, 120), [], 'an old refusal fired')
+  assert.equal(old.reviewerWait?.fired, true, 'an old refusal was left armed')
+
+  const awayAcross = withStatedWait(stated('c1', 0), 180)
+  assert.equal(waitEvents(withStatedWait(undefined, 1), awayAcross, 180).length, 1, 'away: no fire')
+
+  const pendingRead = withStatedWait(stated('c1', 0), 6, {
+    reviewerWait: { commentId: 'c1', updatedAt: at(0), availableAt: at(5), fired: false },
+  })
+  const gap = withStatedWait(undefined, 6, { reviewerWait: pendingRead.reviewerWait })
+  assert.equal(waitEvents(gap, pendingRead, 7).length, 1, 'a pending wait read late never fired')
+})
+
+test('identical refusals each get a wait and an older refusal never re-arms', () => {
+  const old = withStatedWait(stated('c1', 0), 60)
+  waitEvents(withStatedWait(undefined, 60), old, 120)
+
+  const next = withStatedWait(stated('c2', 60), 61, { reviewerWait: old.reviewerWait })
+  assert.deepEqual(waitEvents(old, next, 61), [], 'a new refusal inherited the spent wait')
+  assert.equal(next.reviewerWait?.fired, false)
+
+  const nextDue = withStatedWait(stated('c2', 60), 62, { reviewerWait: next.reviewerWait })
+  assert.equal(waitEvents(next, nextDue, 65).length, 1, 'identical text never fired')
+
+  const olderAgain = withStatedWait(stated('c1', 0), 66, { reviewerWait: nextDue.reviewerWait })
+  assert.deepEqual(waitEvents(nextDue, olderAgain, 70), [], 'an older refusal re-armed')
+})
+
+test('a failed comment read keeps the previous wait, and a wait due meanwhile fires on the next good read', () => {
+  const pending = { commentId: 'c1', updatedAt: at(0), availableAt: at(5), fired: false }
+  const previous = withStatedWait(undefined, 1, { reviewerWait: pending })
+
+  const failed = withStatedWait(undefined, 10, { reviewerWaitReadFailed: true })
+  assert.deepEqual(waitEvents(previous, failed, 10), [], 'a failed read fired')
+  assert.deepEqual(failed.reviewerWait, pending)
+
+  const baseline = withStatedWait(undefined, 0)
+  const failedPoll = withStatedWait(undefined, 3, { reviewerWaitReadFailed: true })
+  assert.deepEqual(waitEvents(baseline, failedPoll, 3), [])
+  assert.equal(failedPoll.reviewerWaitReadAt, at(0), 'a failed read advanced the last good read')
+
+  const goodRead = withStatedWait(stated('c1', 1, 60), 6)
+  assert.equal(
+    waitEvents(failedPoll, goodRead, 6).length,
+    1,
+    'a wait that fell due during a failed read was marked spent'
+  )
+  assert.equal(goodRead.reviewerWaitReadAt, at(6))
+
+  const afterGoodRead = withStatedWait(stated('c1', 0), 90, { reviewerWaitReadAt: at(60) })
+  assert.deepEqual(
+    waitEvents(afterGoodRead, withStatedWait(stated('c1', 0), 91), 100),
+    [],
+    'a time already past at the last good read fired'
+  )
+  assert.equal(
+    waitEvents(afterGoodRead, withStatedWait(stated('c2', 69, 60), 91), 100).length,
+    1,
+    'a time that fell due after the last good read, before the last saved poll, did not fire'
+  )
+})
+
+test('a new refusal with no stated time is reported once, whether or not a wait was pending', () => {
+  const pending = { commentId: 'c1', updatedAt: at(0), availableAt: at(5), fired: false }
+  const refusalAt = (minutes: number, commentId = 'c2') => ({ commentId, updatedAt: at(minutes) })
+  const refusals = (before: PrState, after: PrState): string[] =>
+    compareStates(before, after, [], false, T0 + 3 * MINUTE_MS)
+      .filter((c) => c.type === 'CODERABBIT_RATE_LIMITED')
+      .map((c) => c.detail)
+
+  const previous = withStatedWait(undefined, 1, { reviewerWait: pending })
+  const replaced = withStatedWait(undefined, 3, { untimedRefusal: refusalAt(3) })
+  const events = refusals(previous, replaced)
+  assert.equal(events.length, 1, 'a replaced wait was cleared silently')
+  assert.match(events[0], /no reset time stated/)
+  assert.equal(replaced.reviewerWait, undefined)
+  assert.deepEqual(replaced.untimedRefusal, refusalAt(3), 'the identity was not carried')
+
+  const reread = withStatedWait(undefined, 4, { untimedRefusal: refusalAt(3) })
+  assert.deepEqual(refusals(replaced, reread), [], 'the same refusal read again was reported')
+
+  const edited = withStatedWait(undefined, 5, { untimedRefusal: refusalAt(5) })
+  assert.equal(refusals(reread, edited).length, 1, 'an edited refusal was not reported')
+  const another = withStatedWait(undefined, 5, { untimedRefusal: refusalAt(5, 'c3') })
+  assert.equal(refusals(reread, another).length, 1, 'a newer refusal comment was not reported')
+
+  const afterFired = withStatedWait(undefined, 1, {
+    reviewerWait: { ...pending, fired: true },
+    untimedRefusal: null,
+  })
+  assert.equal(
+    refusals(afterFired, withStatedWait(undefined, 3, { untimedRefusal: refusalAt(3) })).length,
+    1,
+    'a refusal after a fired wait was not reported'
+  )
+
+  const noBaseline = withStatedWait(undefined, 1)
+  assert.deepEqual(
+    refusals(noBaseline, withStatedWait(undefined, 3, { untimedRefusal: refusalAt(3) })),
+    [],
+    'a first poll or a state from before the field reported an old refusal'
+  )
+
+  const failed = withStatedWait(undefined, 3, {
+    untimedRefusal: undefined,
+    reviewerWaitReadFailed: true,
+  })
+  assert.deepEqual(refusals(previous, failed), [], 'a failed read reported a refusal')
+  assert.deepEqual(failed.reviewerWait, pending)
+  assert.deepEqual(refusals(replaced, failed), [])
+  assert.deepEqual(
+    failed.untimedRefusal,
+    replaced.untimedRefusal,
+    'a failed read dropped the saved one'
+  )
+
+  const gone = withStatedWait(undefined, 3, { untimedRefusal: null })
+  assert.deepEqual(refusals(previous, gone), [], 'a wait cleared with no refusal left was reported')
+
+  const statusChange = withStatedWait(undefined, 3, {
+    untimedRefusal: refusalAt(3),
+    coderabbitStatus: 'rate-limited',
+    coderabbitCooloffMinutes: null,
+  })
+  assert.equal(refusals(previous, statusChange).length, 1, 'a second refusal event was emitted')
+})
+
+test('a replaced-wait refusal advances the occurrence count, never reuses or zeroes it', () => {
+  const pending = { commentId: 'c1', updatedAt: at(0), availableAt: at(5), fired: false }
+  const limited = { coderabbitStatus: 'rate-limited' as const, headSha: 'h1' }
+  const occurrences = (before: PrState, after: PrState): number[] =>
+    compareStates(before, after, [], false, T0 + 3 * MINUTE_MS)
+      .filter((c) => c.type === 'CODERABBIT_RATE_LIMITED')
+      .map((c) => Number(/occurrence (\d+)/.exec(c.detail)?.[1]))
+
+  const bannerA = withStatedWait(stated('c1', 0), 1, {
+    ...limited,
+    reviewerWait: pending,
+    coderabbitThrottleCount: 1,
+  })
+  const refusal = { commentId: 'c2', updatedAt: at(3) }
+  const bannerB = withStatedWait(undefined, 3, { ...limited, untimedRefusal: refusal })
+  assert.deepEqual(occurrences(bannerA, bannerB), [2], 'the replaced wait did not advance')
+  assert.equal(bannerB.coderabbitThrottleCount, 2, 'the advanced count was not persisted')
+
+  const reread = withStatedWait(undefined, 4, { ...limited, untimedRefusal: refusal })
+  assert.deepEqual(occurrences(bannerB, reread), [], 'a re-read repeated the event')
+
+  const newHead = withStatedWait(undefined, 3, {
+    ...limited,
+    headSha: 'h2',
+    untimedRefusal: refusal,
+  })
+  assert.deepEqual(occurrences(bannerA, newHead), [2], 'a new head restarted the count')
+
+  const cleared = withStatedWait(undefined, 5, { coderabbitStatus: 'none', headSha: 'h1' })
+  const again = withStatedWait(undefined, 6, limited)
+  occurrences(bannerB, cleared)
+  assert.deepEqual(occurrences(cleared, again), [3], 'a later transition reused a number')
+})
+
+test('the rate-limited event states a time only when a reviewer-available for it is still to come', () => {
+  const limited = { coderabbitStatus: 'rate-limited' as const, coderabbitCooloffMinutes: 21 }
+  const detail = (previous: PrState, current: PrState, nowMinutes: number): string[] =>
+    compareStates(previous, current, [], false, T0 + nowMinutes * MINUTE_MS)
+      .filter((c) => c.type === 'CODERABBIT_RATE_LIMITED')
+      .map((c) => c.detail)
+
+  const passed = withStatedWait(stated('c1', 0, 1260), 120, limited)
+  const [passedDetail, ...passedRest] = detail(withStatedWait(undefined, 90), passed, 120)
+  assert.match(passedDetail, /no reset time stated/, 'a banner whose reset has passed named a time')
+  assert.deepEqual(passedRest, [])
+
+  const newestUnstated = withStatedWait(undefined, 120, {
+    ...limited,
+    untimedRefusal: { commentId: 'c2', updatedAt: at(120) },
+  })
+  const [unstatedDetail, ...unstatedRest] = detail(
+    withStatedWait(undefined, 90),
+    newestUnstated,
+    120
+  )
+  assert.match(unstatedDetail, /no reset time stated/, 'a stale oldest banner stated a time')
+  assert.deepEqual(unstatedRest, [])
+
+  const fresh = withStatedWait(stated('c1', 0, 1260), 0, limited)
+  const [freshDetail, ...freshRest] = detail(withStatedWait(undefined, 0), fresh, 1)
+  assert.match(freshDetail, /next review available at 2026-01-01T00:21:00.000Z/)
+  assert.deepEqual(freshRest, [])
+  const due = withStatedWait(stated('c1', 0, 1260), 1, {
+    ...limited,
+    reviewerWait: fresh.reviewerWait,
+  })
+  assert.equal(
+    compareStates(fresh, due, [], false, T0 + 21 * MINUTE_MS).filter(
+      (c) => c.type === 'reviewer-available'
+    ).length,
+    1,
+    'a fresh banner never fired at its reset'
+  )
+})
+
+test('the read anchor is taken before the comments were read, so a refusal posted during the fetch fires', () => {
+  const sec = (s: number): string =>
+    new Date(Date.parse('2026-01-01T12:00:00Z') + s * 1000).toISOString()
+  const previous = { ...cleanBaseline(), timestamp: sec(-60) }
+  const firstPoll = { ...cleanBaseline(), timestamp: sec(8), commentsReadStartedAt: sec(0) }
+  compareStates(previous, firstPoll, [], false, Date.parse(sec(8)))
+  assert.equal(firstPoll.reviewerWaitReadAt, sec(0), 'the anchor was taken after the read')
+  assert.equal(
+    firstPoll.commentsReadStartedAt,
+    undefined,
+    'the transient time was left to be saved'
+  )
+
+  const secondPoll = {
+    ...cleanBaseline(),
+    timestamp: sec(20),
+    commentsReadStartedAt: sec(12),
+    statedReviewerWait: { commentId: 'c1', updatedAt: sec(2), seconds: 5 },
+  }
+  const events = compareStates(firstPoll, secondPoll, [], false, Date.parse(sec(20))).filter(
+    (c) => c.type === 'reviewer-available'
+  )
+  assert.equal(
+    events.length,
+    1,
+    'a refusal posted after the read and due before the fetch ended was spent'
+  )
+})
+
+test('the stuck-check baseline survives the store round-trip', () => {
+  withIsolatedStore('flow-464-stuck-checks-roundtrip', () => {
+    mkdirSync(storeDir(), { recursive: true })
+    saveState('7', 'owner/repo', withStuck(ciRun(2)))
+    assert.deepEqual(loadState('7', 'owner/repo')?.stuckChecks, ciRun(2))
+
+    saveState('8', 'owner/repo', withStuck(['lint'] as never))
+    assert.deepEqual(loadState('8', 'owner/repo')?.stuckChecks, [
+      { name: 'lint', runId: '', attempt: 0 },
+    ])
+
+    saveState('9', 'owner/repo', withStuck([{ name: 'ci', runId: '77' }] as never))
+    assert.deepEqual(loadState('9', 'owner/repo')?.stuckChecks, ciRun(0))
+  })
+})
+
+test('a pending reviewer wait survives the store round-trip', () => {
+  withIsolatedStore('flow-464-reviewer-wait-roundtrip', () => {
+    mkdirSync(storeDir(), { recursive: true })
+    const wait = { commentId: 'c1', updatedAt: at(0), availableAt: at(5), fired: false }
+    saveState('7', 'owner/repo', {
+      ...withStatedWait(stated('c1', 0), 1),
+      reviewerWait: wait,
+      reviewerWaitReadAt: at(1),
+    })
+    assert.deepEqual(loadState('7', 'owner/repo')?.reviewerWait, wait)
+    assert.equal(loadState('7', 'owner/repo')?.reviewerWaitReadAt, at(1))
+
+    const refusal = { commentId: 'c2', updatedAt: at(3) }
+    saveState('7', 'owner/repo', { ...withStatedWait(undefined, 3), untimedRefusal: refusal })
+    assert.deepEqual(loadState('7', 'owner/repo')?.untimedRefusal, refusal)
+    saveState('7', 'owner/repo', { ...withStatedWait(undefined, 4), untimedRefusal: null })
+    assert.equal(loadState('7', 'owner/repo')?.untimedRefusal, null)
+    saveState('7', 'owner/repo', withStatedWait(undefined, 5))
+    assert.equal(loadState('7', 'owner/repo')?.untimedRefusal, undefined)
+  })
+})
+
 // --- An unreadable thread list must not read as "no open threads" (FLOW-226) ---
 //
 // fetchUnresolvedThreads is the only fetcher whose failure is fail-OPEN. fetchCiChecks returns {},
@@ -206,6 +849,27 @@ const mergeReadyExcept = (overrides: Partial<PrState>): PrState => ({
 })
 
 const openThread: ReviewThread = { path: 'a.ts', line: 1, isResolved: false }
+
+test('a merge-ready new head emits MERGE_READY once, and never with ci-green-awaiting-review', () => {
+  const types = (previous: PrState, current: PrState): string[] =>
+    compareStates(previous, current).map((c) => c.type)
+  const h1 = mergeReadyExcept({ headSha: 'sha1' })
+  const h2 = mergeReadyExcept({ headSha: 'sha2' })
+
+  const onNewHead = types(h1, h2)
+  assert.equal(onNewHead.filter((t) => t === 'MERGE_READY').length, 1, 'new head')
+  assert.equal(onNewHead.includes('ci-green-awaiting-review'), false, 'never together')
+  assert.deepEqual(
+    types(h2, mergeReadyExcept({ headSha: 'sha2' })).filter((t) => t === 'MERGE_READY'),
+    [],
+    'same head re-fired'
+  )
+  assert.deepEqual(
+    types(mergeReadyExcept({ headSha: undefined }), h2).filter((t) => t === 'MERGE_READY'),
+    [],
+    'an unknown previous head is not a new head'
+  )
+})
 
 test('a failed thread fetch emits no MERGE_READY on a PR whose threads are still open (FLOW-226)', () => {
   // The last readable poll saw an open thread; this poll could not read the list at all, so it

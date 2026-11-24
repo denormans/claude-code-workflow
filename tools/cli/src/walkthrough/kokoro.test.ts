@@ -212,7 +212,7 @@ test('narrateWithKokoro reports helper failures as VoiceErrors and caches nothin
       ['af_nosuch', 'Kokoro has no speaker "af_nosuch"'],
       [
         'af_unfetched',
-        'Kokoro could not download the speaker "af_unfetched"; the first render with a new speaker needs the network',
+        'Kokoro could not download the speaker "af_unfetched"; the first run with a new speaker needs the network',
       ],
       ['af_broken', 'the Kokoro helper exited with status 1'],
       [

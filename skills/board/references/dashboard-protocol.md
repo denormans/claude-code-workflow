@@ -304,10 +304,10 @@ what I am asking them to approve change?* If yes, the two are not independent.
 stop.** If your own judgement says a particular open question could not change this approval, the
 guard does not share that judgement and refuses anyway. That is not a bug to route around: the
 required action is still **wait**, the same as everywhere else in this rule — never reach for
-`--approval-kind` (reserved for the three exemption categories below, never for "this one doesn't
+`--approval-kind` (reserved for the four exemption categories below, never for "this one doesn't
 count") or `--type question` to get past a refusal you believe is over-broad. Mechanically, the
 guard reads that count only for an approval that declared no `--approval-kind`; a declared HOLD,
-credential, or checkpoint returns before it is ever fetched. That is a statement about what the CLI
+credential, checkpoint, or launch request returns before it is ever fetched. That is a statement about what the CLI
 inspects, not a category you may argue your way into — which approvals may declare one is settled
 below, and it is never a judgement about the open question.
 
@@ -347,10 +347,10 @@ no queue, correctly, since a node that has never deferred anything has nothing p
 refuses the post outright either way — `dashboard item add` itself refuses before ever reaching this
 check, the same guard that protects every other read of this file, so the approval never reaches the
 board on a corrupt file at all. Every other queued open
-question blocks the post as intended. It governs advancement approvals only: a HOLD, credential, or checkpoint approval returns
+question blocks the post as intended. It governs advancement approvals only: a HOLD, credential, checkpoint, or launch approval returns
 before this check — or the board-count check above it — ever runs (§3.1, *the guard reads that
 count only for an approval that declared no `--approval-kind`*), so a deferred queue never blocks
-one of those three.
+one of those four.
 
 **When you are unsure, hold.** The asymmetry is one-sided: holding costs one board round-trip;
 posting early costs the user a rejection they have to compose **and** the same round-trip. Holding
@@ -362,31 +362,33 @@ Cases that are always entangled, not judgement calls:
 - A deferral-gate question (contract rule 5) — "fix it here" is one of its two answers by
   construction, so it can always change what ships.
 
-**Exactly three** kinds of approval are not advancement approvals, and all three are recognisable
+**Exactly four** kinds of approval are not advancement approvals, and all four are recognisable
 from the approval alone, without reference to the open question:
 
 - a **HOLD** item — it withdraws advancement rather than requesting it;
 - a **credential / auth / environment ask** — it is not advancement at all;
 - a **checkpoint** — the harness paused the session (a usage limit, a stalled teardown, or a
-  similar external stop) with nothing for the user to decide, only to act on.
+  similar external stop) with nothing for the user to decide, only to act on;
+- a **launch request** — it asks to start a separate session and moves this work nowhere. Declare
+  it only when the approval's prompt states the directory, title and exact starting prompt.
 
-There is no fourth "unrelated subject" category. *"An approval the open question cannot change"* is
+There is no fifth "unrelated subject" category. *"An approval the open question cannot change"* is
 not an exemption, it is this rule's own precondition restated — the rule already reads "an item whose
 answer **could change** X". Listing it as an exemption teaches that "not an advancement approval" is
 a judgement about entanglement, which hands back the exact escape the definition above exists to
 close. A concrete false case: *"this approval is about the deploy config, not the code the open
 question is about"* sounds like a plausible unrelated-subject claim, and it is exactly the escape
 this rule closes — the deploy-config approval still asks the user to move something forward, and it
-is not one of the three exemptions above, so it holds like any other advancement approval,
+is not one of the four exemptions above, so it holds like any other advancement approval,
 subject-matter argument notwithstanding.
 
-**Passing `--approval-kind` on anything other than these three cases is prohibited, not merely
+**Passing `--approval-kind` on anything other than these four cases is prohibited, not merely
 undocumented — unconditionally, regardless of whether the guard is currently enforcing anything.**
-Declaring `hold`, `credential`, or `checkpoint` on an approval that is actually advancement is the
+Declaring `hold`, `credential`, `checkpoint`, or `launch` on an approval that is actually advancement is the
 FLOW-211 defect this rule exists to close, restated as a false claim on the enum instead of an
-omitted check — it is not a fourth way to satisfy the guard, in any REV rollout state. The CLI's
-refusal and this rule's definition agree exactly: anything not declared `hold`, `credential`, or
-`checkpoint` **is** an advancement approval by this rule's own construction (the "Exactly three"
+omitted check — it is not a fifth way to satisfy the guard, in any REV rollout state. The CLI's
+refusal and this rule's definition agree exactly: anything not declared `hold`, `credential`,
+`checkpoint`, or `launch` **is** an advancement approval by this rule's own construction (the "Exactly four"
 paragraph above) — there is no case where the CLI refuses something that "isn't really advancement."
 If refused, the required action is the same as everywhere else in this rule: **wait**. Never reach
 for `--approval-kind` to route around a refusal, and never fall back to `--type question` either —
@@ -397,10 +399,11 @@ per-node check finds nothing there to refuse. The rule is about the work being e
 which node happens to record which item — retargeting to dodge a refusal you know is warranted is
 the same misuse as the other two, even though the guard itself cannot always tell.
 
-**All three still have to declare themselves, because the CLI cannot tell.** All three post as
+**All four still have to declare themselves, because the CLI cannot tell.** All four post as
 `dashboard item add --type approval`, and nothing in a prompt string distinguishes "do not merge
-this" from "please merge this" from "the session paused, nothing to decide." So those three paths
-pass `--approval-kind hold`, `--approval-kind credential`, or `--approval-kind checkpoint`.
+this" from "please merge this" from "the session paused, nothing to decide." So those four paths
+pass `--approval-kind hold`, `--approval-kind credential`, `--approval-kind checkpoint`, or
+`--approval-kind launch`.
 
 **The flag supplies a missing fact, not a permission.** It is the same shape as `--key`, which
 resolves *which node*, not *trust me* — and it is deliberately an enum, not free text. An enum claim
@@ -420,6 +423,11 @@ them to move work forward. `--approval-kind credential` on that prompt is the sa
 merge"* is not a checkpoint — it is an advancement approval, and it waits. A checkpoint is
 harness-initiated, external, and decision-free; approving a merge is a decision the user makes.
 `--approval-kind checkpoint` on that prompt is the same visible defect as the two above.
+
+**A concrete false case for `launch`:** *"merge this PR"* is not a launch request — it asks the user
+to advance the work, which is exactly what an advancement approval is. A launch request asks only to
+start a separate session and states its directory, title and starting prompt.
+`--approval-kind launch` on that prompt is the same visible defect as the three above.
 
 ## 4. Reconcile by channel
 
@@ -505,6 +513,10 @@ limit implies, is the padding `skills/board/references/escalation-contract.md` �
 then `rm -f "<tmpfile>"`, before you wind down. A session that goes quiet at a usage limit
 with nothing on the board is indistinguishable from one that crashed (FLOW-223).
 
+A `[turn] failed-turn` wake means your last turn was cut off by an API, network or sleep error. Re-read
+the transcript and the state of the work before repeating anything, because a tool call may have run
+with its result lost; then continue from where it stopped.
+
 ## 8. Info notes
 
 An info note tells the user something worth keeping that needs nothing from them. It shows on the
@@ -537,13 +549,31 @@ work waits unseen, and the note does not count as the step done: withdraw it
 `CI_GREEN_ON_DRAFT` and `MERGE_READY` entries each carry a `→` line naming the PR Lifecycle handler
 to run, which ends in that approval (FLOW-427).
 
-**Three notes are prescribed, not judged.** The Renovate monitor's `all-done` session summary
+**Four notes are prescribed, not judged.** A turn's final reply to the user is posted every time,
+as described below. The Renovate monitor's `all-done` session summary
 (`skills/renovate-prs/references/monitor-runbook.md`, `event = "all-done"`) is posted every time
 that event fires. The info-note reply that §6 prescribes for a board comment is posted every
 time §6 calls for one. The report of a ticket the workflow meant to move and could not is posted
 every time
 `skills/workflow-guide/references/routing.md` §Cross-Phase Rule: The Workflow Moves Its Own Tickets
 reports one. None of them waits on the bar above.
+
+**Never respond to the user only in the terminal while a board is available.** A turn that ends
+with a reply to the user puts that reply on the board before it ends. This covers a short answer,
+a finished result, and a reply to a prompt as narrow as "reply with one word": the prompt limits
+how long the reply is, not where it goes.
+
+- Post it as a note, unless an item this turn posted already carries it. A question, an approval
+  or a comment reply that says the same thing is enough.
+- A reply over the note's limits goes up as its outcome and what the user needs from it.
+- With no board, `item add` exits 3 and the terminal is where you respond.
+- Post a closing reply before the `dashboard session leave` that ends the session's last node, and
+  state only what has already run. A note survives the leave, but a keyless post after it opens a
+  new live node. A failure in a step after the leave is the exception: post it as its own item.
+- No note is owed for a comment §6 lets you consume with no reply, or about a withdrawn question.
+- A line saying what you are waiting on while a named wake is pending is a progress update, not a
+  reply. So is anything you write while the turn continues.
+- A teammate or subagent reports to the agent that spawned it and posts no note for its reply.
 
 **Never post a note about a withdrawn question** — not that it was withdrawn, and not why, even
 when a replacement question follows it. The withdrawal shows on the board, and that is all the user

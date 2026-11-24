@@ -158,5 +158,5 @@ test('hook: calls stop-gate with --session and no --watch-command', () => {
   const calls = readFileSync(join(pluginRoot, 'bin', 'calls.log'), 'utf-8')
     .trim()
     .split('\n')
-  assert.deepEqual(calls, ['stop-gate --session sid-5'])
+  assert.deepEqual(calls, ['turn-succeeded --session sid-5', 'stop-gate --session sid-5'])
 })

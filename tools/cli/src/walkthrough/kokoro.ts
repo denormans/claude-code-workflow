@@ -53,6 +53,7 @@ interface CacheEntry {
 export const KOKORO_VERSION = '0.9.4'
 // Kokoro's own pace.
 export const SPEED = 1
+const AUDIO_EXTENSION = '.m4a'
 
 const MISSING_TOOL_EXIT = 2
 // The helper's exit code when Kokoro has no speaker by the name it was given.
@@ -91,7 +92,7 @@ export const kokoroEntry: VoiceEntry = {
   tool: 'kokoro-voice',
   use: 'A local Kokoro voice narrating walkthrough videos',
   onFailure:
-    'STOP and tell the user a Kokoro voice is configured but walkthrough render cannot voice the narration with it. Do NOT fall back.',
+    'STOP and tell the user a Kokoro voice is configured but the walkthrough narration cannot be voiced with it. Do NOT fall back.',
   fromEnv: ({ env }) => {
     const voice = env.WALKTHROUGH_KOKORO_VOICE || undefined
 
@@ -182,7 +183,10 @@ export const wordPoints = (text: string, words: KokoroWord[]): CuePoint[] => {
 const kokoroVoice = (voice: string): Voice => ({
   name: 'kokoro',
   billsPerCharacter: false,
+  audioExtension: AUDIO_EXTENSION,
   problem: () => kokoroProblem(voice),
+  isCached: ({ narration }, cacheDir) =>
+    cacheEntryOf(narration, { voice, cacheDir }).cached !== undefined,
   narrate: async (scenes, cacheDir) => narrateWithKokoro(scenes, { voice, cacheDir }),
 })
 
@@ -190,7 +194,7 @@ const cacheEntryOf = (text: string, options: KokoroOptions): CacheEntry => {
   const key = createHash('sha256')
     .update(JSON.stringify(['kokoro', KOKORO_VERSION, options.voice, SPEED, text]))
     .digest('hex')
-  const audioFile = join(options.cacheDir, `${key}.m4a`)
+  const audioFile = join(options.cacheDir, `${key}${AUDIO_EXTENSION}`)
   const entryFile = join(options.cacheDir, `${key}.json`)
 
   return { key, text, audioFile, entryFile, cached: readCached(entryFile, audioFile) }
@@ -217,7 +221,7 @@ const voiceScenes = (misses: CacheEntry[], options: KokoroOptions): Alignment[] 
       const { duration, words } = replies[i]
       toAac(wavs[i], audioFile)
       const alignment = alignmentOf(text, wordPoints(text, words), duration)
-      writeFileSync(entryFile, JSON.stringify({ audioFile: `${key}.m4a`, alignment }))
+      writeFileSync(entryFile, JSON.stringify({ audioFile: `${key}${AUDIO_EXTENSION}`, alignment }))
 
       return alignment
     })
@@ -271,7 +275,7 @@ const runHelper = (
   if (result.status === UNFETCHED_SPEAKER_EXIT) {
     throw new VoiceError(
       `Kokoro could not download the speaker "${request.voice}"; ` +
-        'the first render with a new speaker needs the network'
+        'the first run with a new speaker needs the network'
     )
   }
 

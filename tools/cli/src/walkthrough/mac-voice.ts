@@ -9,6 +9,7 @@ import {
   failureOf,
   isMissing,
   readCached,
+  type Alignment,
   type CuePoint,
   type Narration,
   type Voice,
@@ -29,6 +30,7 @@ export class MacVoiceError extends VoiceError {}
 
 const MISSING_TOOL_EXIT = 2
 const AAC = ['--file-format=m4af', '--data-format=aac']
+const AUDIO_EXTENSION = '.m4a'
 
 // A macOS voice, turned on by WALKTHROUGH_MAC_VOICE, which names it as `say -v '?'` lists it.
 export const macVoiceEntry: VoiceEntry = {
@@ -38,7 +40,7 @@ export const macVoiceEntry: VoiceEntry = {
   tool: 'mac-voice',
   use: 'A macOS voice narrating walkthrough videos',
   onFailure:
-    'STOP and tell the user a macOS voice is configured but walkthrough render cannot voice the narration with it. Do NOT fall back.',
+    'STOP and tell the user a macOS voice is configured but the walkthrough narration cannot be voiced with it. Do NOT fall back.',
   fromEnv: ({ env }) => {
     const voice = env.WALKTHROUGH_MAC_VOICE || undefined
 
@@ -101,12 +103,7 @@ export const narrateWithMacVoice = (
   cues: string[],
   options: MacVoiceOptions
 ): Narration => {
-  const key = createHash('sha256')
-    .update(JSON.stringify(['mac', options.voice, text, cues]))
-    .digest('hex')
-  const audioFile = join(options.cacheDir, `${key}.m4a`)
-  const entryFile = join(options.cacheDir, `${key}.json`)
-  const cached = readCached(entryFile, audioFile)
+  const { key, audioFile, entryFile, cached } = cacheEntryOf(text, cues, options)
 
   if (cached !== undefined) {
     return { audioFile, alignment: cached, cached: true }
@@ -115,9 +112,23 @@ export const narrateWithMacVoice = (
   mkdirSync(options.cacheDir, { recursive: true })
   speak(text, options.voice, audioFile, AAC)
   const alignment = alignmentOf(text, cuePoints(text, cues, options.voice), durationOf(audioFile))
-  writeFileSync(entryFile, JSON.stringify({ audioFile: `${key}.m4a`, alignment }))
+  writeFileSync(entryFile, JSON.stringify({ audioFile: `${key}${AUDIO_EXTENSION}`, alignment }))
 
   return { audioFile, alignment, cached: false }
+}
+
+const cacheEntryOf = (
+  text: string,
+  cues: string[],
+  options: MacVoiceOptions
+): { key: string; audioFile: string; entryFile: string; cached: Alignment | undefined } => {
+  const key = createHash('sha256')
+    .update(JSON.stringify(['mac', options.voice, text, cues]))
+    .digest('hex')
+  const audioFile = join(options.cacheDir, `${key}${AUDIO_EXTENSION}`)
+  const entryFile = join(options.cacheDir, `${key}.json`)
+
+  return { key, audioFile, entryFile, cached: readCached(entryFile, audioFile) }
 }
 
 // Each voice's name in `say -v '?'`'s listing: the text before its locale.
@@ -130,7 +141,10 @@ export const voicesOf = (listing: string): string[] =>
 const macVoice = (voice: string): Voice => ({
   name: 'mac',
   billsPerCharacter: false,
+  audioExtension: AUDIO_EXTENSION,
   problem: () => macVoiceProblem(voice),
+  isCached: ({ narration, cues }, cacheDir) =>
+    cacheEntryOf(narration, cues, { voice, cacheDir }).cached !== undefined,
   narrate: async (scenes, cacheDir) =>
     scenes.map(({ narration, cues }) => narrateWithMacVoice(narration, cues, { voice, cacheDir })),
 })
