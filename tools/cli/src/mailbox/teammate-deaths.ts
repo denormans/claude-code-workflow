@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { tryResolveRawSessionId } from '../dashboard/session-id.ts'
+import { startedTeammatePids } from '../dashboard/teammate-turns.ts'
 import { parseTeammateArgv, readPsOutput } from '../process-table.ts'
 import {
   atomicWrite,
@@ -24,6 +25,7 @@ import {
 export const SPAWN_GRACE_MS = 5 * 60_000
 
 const LEDGER_FILENAME = 'teammate-deaths-reported.json'
+const NEVER_STARTED_LEDGER_FILENAME = 'teammate-never-started-reported.json'
 const ROSTER_FILENAME = 'teammate-roster.json'
 
 export interface RunningAgent {
@@ -159,7 +161,7 @@ export const scanTeammateDeaths = (
   const all = scan.members.filter(
     (m) => m.pid === null && (scan.dissolved || now - m.joinedAt >= SPAWN_GRACE_MS)
   )
-  const reported = new Set(loadLedger(rawSessionId))
+  const reported = new Set(loadKeys(ledgerPath(rawSessionId)))
   return { all, unreported: all.filter((m) => !reported.has(deathKey(m))) }
 }
 
@@ -176,6 +178,52 @@ export const formatTeammateDeath = (death: TeammateStatus): string =>
   `acknowledgment, the shutdown is complete — nothing else needed. Otherwise, if its work is ` +
   `unfinished, respawn it — if the respawn dies too, the client needs a restart (usually after an ` +
   `update).`
+
+// Which of this session's teammates have a running process but no recorded turn, and are not yet
+// reported (FLOW-468). A teammate's turn start or end writes its pid into the lead's turn list
+// (teammate-turns.ts), so a member past the spawn grace whose pid is missing there has recorded no
+// turn. That is weaker than never having started: a started teammate also lacks an entry when its
+// write is dropped (the lead's turn-list lock is not claimed within its wait) or when
+// resolveTeammateIdentity returns null because `ps` failed. A turn list that cannot be read
+// reports nothing: which teammates recorded a turn is then unknown, not none.
+export const scanTeammatesNeverStarted = (
+  rawSessionId: string,
+  now: number = Date.now(),
+  processes: RunningAgent[] | null = runningAgents()
+): TeammateDeathScan => {
+  const scan = scanTeammates(rawSessionId, processes)
+  const started = startedTeammatePids(rawSessionId)
+  if (scan === null || started === null) {
+    return { all: [], unreported: [] }
+  }
+
+  const all = scan.members.filter(
+    (m) => m.pid !== null && now - m.joinedAt >= SPAWN_GRACE_MS && !started.has(m.pid)
+  )
+  const reported = new Set(loadKeys(neverStartedLedgerPath(rawSessionId)))
+  return { all, unreported: all.filter((m) => !reported.has(deathKey(m))) }
+}
+
+// Rewrite the ledger to exactly `all`, as recordTeammateDeathsReported does: a teammate that has
+// since had a turn recorded, or left the roster, drops out.
+export const recordTeammatesNeverStartedReported = (
+  all: TeammateStatus[],
+  rawSessionId: string
+): void => {
+  atomicWrite(neverStartedLedgerPath(rawSessionId), JSON.stringify(all.map(deathKey), null, 2))
+}
+
+export const formatTeammateNeverStarted = (member: TeammateStatus): string =>
+  `[team] teammate-never-started ${member.name} — ${member.agentId} has a running process ` +
+  `(pid ${member.pid}, joined ${new Date(member.joinedAt).toISOString()}) but has recorded no ` +
+  `turn since it joined. If you have had any message from it since you spawned it, it did start ` +
+  `and this report is a missed write — ignore it. Otherwise end its process with ` +
+  `\`kill ${member.pid}\`, then confirm it exited: \`kill -0 ${member.pid}\` fails once it is gone, ` +
+  `so re-check for up to 10 seconds, since a process handling SIGTERM can linger. If it is still ` +
+  `running after that, post a board blocker naming the pid. Once it is confirmed gone: if you ` +
+  `were waiting on its shutdown acknowledgment, the shutdown is complete — nothing else ` +
+  `needed; if its work is unfinished, respawn it with the same instructions — if the respawn ` +
+  `is reported teammate-never-started too, the client needs a restart.`
 
 // Exported for the argv test.
 export const parseAgentProcesses = (psOutput: string): RunningAgent[] =>
@@ -330,11 +378,14 @@ const deathKey = (death: TeammateStatus): string => `${death.agentId}:${death.jo
 const ledgerPath = (rawSessionId: string): string =>
   storePath(sessionGlobalScope(rawSessionId), LEDGER_FILENAME)
 
+const neverStartedLedgerPath = (rawSessionId: string): string =>
+  storePath(sessionGlobalScope(rawSessionId), NEVER_STARTED_LEDGER_FILENAME)
+
 // Absent or torn ledger = nothing reported yet: a duplicate wake costs one look, a lost wake is
 // the indefinite stall this file exists to end.
-const loadLedger = (rawSessionId: string): string[] => {
+const loadKeys = (path: string): string[] => {
   try {
-    const parsed = JSON.parse(readFileSync(ledgerPath(rawSessionId), 'utf8')) as unknown
+    const parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown
     return Array.isArray(parsed) ? parsed.filter((k): k is string => typeof k === 'string') : []
   } catch {
     return []

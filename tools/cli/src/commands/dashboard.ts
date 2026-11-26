@@ -30,6 +30,7 @@ import {
   runLinkAdd,
 } from '../dashboard/lifecycle.ts'
 import { readStdin, runWait } from '../dashboard/background-wait.ts'
+import { runTurnEnd, runTurnStart } from '../dashboard/turn-outcome.ts'
 import { runReadAnswers, runReadComments } from '../dashboard/read.ts'
 import { runStatus } from '../dashboard/status.ts'
 import { runRepair } from '../dashboard/repair.ts'
@@ -88,6 +89,52 @@ const waitCommand = buildCommand({
   },
   func(flags: { session?: string; clear: boolean; 'recorded-before'?: string }) {
     runWait(flags.session, flags.clear ? null : readStdin(), flags['recorded-before'])
+  },
+})
+
+const turnEndCommand = buildCommand({
+  docs: {
+    brief:
+      'Record how this session’s turn ended on its board node (Stop or StopFailure payload on stdin)',
+  },
+  parameters: {
+    flags: {
+      session: sessionFlag,
+      outcome: {
+        kind: 'enum',
+        values: ['finished', 'failed'] as const,
+        brief: 'How the turn ended',
+      },
+    },
+    positional: { kind: 'tuple', parameters: [] },
+  },
+  func(flags: { session?: string; outcome: 'finished' | 'failed' }) {
+    runTurnEnd(flags.session, flags.outcome, readStdin())
+  },
+})
+
+const turnStartCommand = buildCommand({
+  docs: {
+    brief: 'Clear the last turn’s outcome on this session’s board node: a new turn has started',
+  },
+  parameters: {
+    flags: {
+      session: sessionFlag,
+      'started-at': {
+        kind: 'parsed',
+        parse: parseNonBlankString('--started-at'),
+        brief: 'The ISO instant the turn started; an outcome recorded at or after it is kept',
+      },
+      interactive: {
+        kind: 'boolean',
+        default: false,
+        brief: 'Someone is at the prompt: a turn end may open a board node for this session',
+      },
+    },
+    positional: { kind: 'tuple', parameters: [] },
+  },
+  func(flags: { session?: string; 'started-at': string; interactive: boolean }) {
+    runTurnStart(flags.session, flags['started-at'], flags.interactive)
   },
 })
 
@@ -415,6 +462,8 @@ const sessionRoutes = buildRouteMap({
     leave: leaveCommand,
     heartbeat: heartbeatCommand,
     wait: waitCommand,
+    'turn-end': turnEndCommand,
+    'turn-start': turnStartCommand,
     pause: pauseCommand,
     resume: resumeCommand,
     end: endCommand,

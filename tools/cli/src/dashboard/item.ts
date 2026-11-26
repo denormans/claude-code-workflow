@@ -3,8 +3,7 @@ import {
   resolveSessionTargetOrRefuse,
   tryResolveRawSessionId,
 } from './session-id.ts'
-import { claimLock, releaseLockAt } from '../pr-monitor/lock.ts'
-import { blockingSleep } from '../pr-monitor/state.ts'
+import { claimLockWithin, releaseLockAt } from '../pr-monitor/lock.ts'
 import { sessionGlobalScope, storePath } from '../workflow-store/store.ts'
 import { runEnter } from './enter.ts'
 import {
@@ -137,6 +136,22 @@ export const runLaunchTitle = (session: string, title: string): void => {
   } catch (err) {
     process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`)
     setRequestedExitCode(1)
+  }
+}
+
+// Opens the session's conversation root the way a first `item add` does, titled from `text`'s first
+// line (turn-outcome.ts, for a session outside any workflow). true when the session has a node
+// afterwards, including one it already had. Errors are reported on stderr and read as false.
+export const ensureSessionConversationNode = (
+  session: string | undefined,
+  text: string,
+  bin: string
+): boolean => {
+  try {
+    return openConversationNodeUnderLock(conversationTitle(text), bin, undefined, session)
+  } catch (err) {
+    process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`)
+    return false
   }
 }
 
@@ -504,18 +519,13 @@ const conversationLockWaitMs = (): number => {
   return Number.isFinite(override) && override > 0 ? override : CONVERSATION_LOCK_WAIT_MS
 }
 
-const claimConversationLock = (lockPath: string): boolean => {
-  const deadline = Date.now() + conversationLockWaitMs()
-
-  while (!claimLock(lockPath, 'conversation node').acquired) {
-    if (Date.now() >= deadline) {
-      return false
-    }
-    blockingSleep(CONVERSATION_LOCK_POLL_MS)
-  }
-
-  return true
-}
+const claimConversationLock = (lockPath: string): boolean =>
+  claimLockWithin(
+    lockPath,
+    'conversation node',
+    conversationLockWaitMs(),
+    CONVERSATION_LOCK_POLL_MS
+  )
 
 // The board card's title: the item's first non-blank line, cut to CONVERSATION_TITLE_MAX code
 // points, with these removed: leading `>` quote markers, `#`-to-`######` heading markers, bullet

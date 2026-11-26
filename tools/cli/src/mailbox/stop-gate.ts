@@ -8,6 +8,12 @@ import {
 } from '../dashboard/state.ts'
 import { atomicWrite, clearStore, load, sessionScope, storePath } from '../workflow-store/store.ts'
 import { pollTargets } from './check.ts'
+import { loadWatchedFor } from '../pr-monitor/state.ts'
+import { busyTeammateLabels } from '../dashboard/teammate-turns.ts'
+import {
+  backgroundTasksFromStopPayload,
+  type BackgroundTask,
+} from '../dashboard/background-wait.ts'
 import { resolveBoardLifecycle } from '../dashboard/status.ts'
 import { RegistryUnreadableError } from '../dashboard/registry.ts'
 import { invokeDashboardBin, resolveDashboardBin } from '../dashboard/invoke.ts'
@@ -23,7 +29,7 @@ import {
 // a constant it doesn't own.
 export const MAX_BLOCKS = 2
 
-export const runStopGate = (session?: string): void => {
+export const runStopGate = (session?: string, payload?: string): void => {
   let sessionId: string
   try {
     sessionId = resolveSessionId(session)
@@ -115,16 +121,42 @@ export const runStopGate = (session?: string): void => {
   const released =
     registryUnreadable === undefined && unreadableTargets.length === 0 ? releasedItems(targets) : []
 
+  const isNothingOwed =
+    registryUnreadable === undefined && unreadableTargets.length === 0 && released.length === 0
+
   // An open item with nothing released is a wait the wake mod (hooks/wake.ts) answers: it checks the
   // board while the session is idle and starts a turn when the answer is released. Nothing is left
   // for this gate to ask for, so it allows — and re-arms, so a later zero-item stop starts a fresh
   // budget.
-  if (
-    registryUnreadable === undefined &&
-    unreadableTargets.length === 0 &&
-    released.length === 0 &&
-    openItemIds.length > 0
-  ) {
+  if (isNothingOwed && openItemIds.length > 0) {
+    clearGateState(gateKey)
+    console.log('allow')
+    return
+  }
+
+  // A PR this session watches is a wait the wake mod (hooks/wake.ts) answers: while the session is
+  // idle it polls the PR through `mailbox check` and starts a turn on what the monitor reports. A
+  // reason that says nothing can wake the session would be false.
+  if (isNothingOwed && rawId !== undefined && loadWatchedFor(rawId).length > 0) {
+    clearGateState(gateKey)
+    console.log('allow')
+    return
+  }
+
+  // A pane-backed teammate whose turn is under way is a wait the harness answers: the teammate's
+  // reply, or its idle notice when the turn ends, starts the lead's next turn. Its own turn start
+  // and end record it (dashboard/teammate-turns.ts), so the session has a wake, and a reason saying
+  // nothing can wake it would be false.
+  if (isNothingOwed && rawId !== undefined && busyTeammateLabels(rawId).length > 0) {
+    clearGateState(gateKey)
+    console.log('allow')
+    return
+  }
+
+  // A background task the turn ended on counts as a wait. The Stop payload lists it, and
+  // hooks/mailbox-watch.sh passes the payload in. backgroundTasksFromStopPayload drops teammates,
+  // because the engine reports an idle teammate as running.
+  if (isNothingOwed && stopPayloadTasks(payload).length > 0) {
     clearGateState(gateKey)
     console.log('allow')
     return
@@ -133,12 +165,7 @@ export const runStopGate = (session?: string): void => {
   // A conversation node is one `item add` opened for a session no workflow entered (FLOW-439).
   // With nothing open or released there is no work to send the agent back to, so the zero-item
   // block below does not apply.
-  if (
-    registryUnreadable === undefined &&
-    unreadableTargets.length === 0 &&
-    released.length === 0 &&
-    activePhase === CONVERSATION_PHASE
-  ) {
+  if (isNothingOwed && activePhase === CONVERSATION_PHASE) {
     clearGateState(gateKey)
     console.log('allow')
     return
@@ -216,6 +243,21 @@ export const hasPendingWork = (sessionId: string): boolean => {
   return dashState?.registered === true && dashState.openItemIds.length > 0
 }
 
+// The non-teammate background tasks a Stop payload lists. No payload, or one that is not JSON,
+// lists none: the caller treats a task as a reason to stop quietly, so an unreadable payload must
+// not grant one.
+const stopPayloadTasks = (payload: string | undefined): BackgroundTask[] => {
+  if (payload === undefined) {
+    return []
+  }
+
+  try {
+    return backgroundTasksFromStopPayload(JSON.parse(payload))
+  } catch {
+    return []
+  }
+}
+
 interface ReleasedOnNode {
   item: ReleasedItem
   nodeId: string
@@ -275,9 +317,9 @@ const computeSignature = (
   })
 }
 
-// Each reason names only what is true of its own case. With zero open items, a stop parks the
-// session on a wake condition that cannot occur (FLOW-223). With unreadable state, nothing here can
-// say what is pending, so the reason says what to repair.
+// Each reason names only what is true of its own case. With zero open items and none of the waits
+// runStopGate allows for, this gate knows of no wake for the session (FLOW-223). With unreadable
+// state, nothing here can say what is pending, so the reason says what to repair.
 const buildReason = (
   openItemIds: string[],
   unreadableTargets: string[],

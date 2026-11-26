@@ -11,8 +11,11 @@ import {
 } from './monitor-deaths.ts'
 import {
   formatTeammateDeath,
+  formatTeammateNeverStarted,
   recordTeammateDeathsReported,
+  recordTeammatesNeverStartedReported,
   scanTeammateDeaths,
+  scanTeammatesNeverStarted,
 } from './teammate-deaths.ts'
 import {
   formatFailedTurn,
@@ -80,6 +83,7 @@ export const runCheck = (session?: string): void => {
   }
   monitorDeaths(rawId)
   teammateDeaths(rawId)
+  teammatesNeverStarted(rawId)
   failedTurn(rawId)
   pollPrs()
   if (answers.isPartial) {
@@ -241,4 +245,16 @@ const teammateDeaths = (rawId: string): void => {
 
   console.log(deaths.unreported.map(formatTeammateDeath).join('\n'))
   recordTeammateDeathsReported(deaths.all, rawId)
+}
+
+// A teammate with a process and no recorded turn (FLOW-468) can leave the lead waiting as a dead
+// one does. Printed before recorded, as above.
+const teammatesNeverStarted = (rawId: string): void => {
+  const stalled = scanTeammatesNeverStarted(rawId)
+  if (stalled.unreported.length === 0) {
+    return
+  }
+
+  console.log(stalled.unreported.map(formatTeammateNeverStarted).join('\n'))
+  recordTeammatesNeverStartedReported(stalled.all, rawId)
 }

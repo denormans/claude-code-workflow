@@ -1,6 +1,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { findLeadSessionId, parseProcessTable, type ProcessRow } from './lead.ts'
+import {
+  findLeadSessionId,
+  findTeammateIdentity,
+  parseProcessTable,
+  type ProcessRow,
+} from './lead.ts'
 
 const TEAMMATE_COMMAND =
   '/usr/local/bin/claude --agent-id impl@team-x --agent-name impl --team-name team-x ' +
@@ -54,6 +59,32 @@ test('findLeadSessionId: a cycle in the table ends the walk', () => {
   ]
 
   assert.equal(findLeadSessionId(rows, 30), undefined)
+})
+
+test('findTeammateIdentity: names the teammate row two levels up, and nothing for a non-teammate or a teammate whose lead is itself', () => {
+  const rows: ProcessRow[] = [
+    { pid: 10, ppid: 1, command: TEAMMATE_COMMAND },
+    { pid: 20, ppid: 10, command: '/bin/bash -c test-lock -- pnpm test' },
+    { pid: 30, ppid: 20, command: 'node main.ts dashboard session turn-end' },
+  ]
+
+  assert.deepEqual(findTeammateIdentity(rows, 30, 'teammate-session-1'), {
+    leadSessionId: 'lead-session-1',
+    label: 'impl',
+    pid: 10,
+  })
+  assert.equal(findTeammateIdentity(rows, 30, 'lead-session-1'), undefined)
+  assert.equal(
+    findTeammateIdentity(
+      [
+        { pid: 10, ppid: 1, command: '/usr/local/bin/claude --dangerously-skip-permissions' },
+        { pid: 30, ppid: 10, command: 'node main.ts dashboard session turn-end' },
+      ],
+      30,
+      'teammate-session-1'
+    ),
+    undefined
+  )
 })
 
 test('parseProcessTable: reads pid, ppid and the whole command, skipping blank lines', () => {

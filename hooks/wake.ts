@@ -19,8 +19,21 @@ const BEAT_INTERVAL_MS = 300_000
 // `dashboard session heartbeat` invokes the board once per live leaf, 5s each, plus one
 // `session list` read for each leaf marked paused.
 const BEAT_TIMEOUT_MS = 30_000
-// `dashboard session wait --clear` invokes the board once per own leaf, 5s each.
+// `mailbox turn-started` makes no board call. It takes the failed-turn record lock, which waits at
+// most 500 tries of 20ms (10s, in withRecordLock) before running unlocked, then reads and writes
+// the turn marks locally.
 const CLEAR_TIMEOUT_MS = 30_000
+// `dashboard session wait --clear` claims the teammate-turns lock once, waiting up to 15s while a
+// holder makes one 5s board call per leaf, 15s for three leaves. Its locked step makes one 5s
+// clear call per leaf, another 15s, and nothing runs after it. 15 + 15 = 30s, and 15s of slack
+// keeps contention in the skip path rather than a kill.
+const WAIT_CLEAR_TIMEOUT_MS = 45_000
+// `dashboard session turn-start` claims the teammate-turns lock twice, for the lead's stop tasks and
+// for a teammate's busy entry. Each claim waits up to 15s while a holder makes one 5s board call per
+// leaf, 15s for three leaves; a claim then runs its own locked step, which is as long again, and the
+// run ends with one 5s `session turn --clear` per leaf. 2 x (15 + 15) + 15 = 75s, and 15s of slack
+// keeps contention in the skip path rather than a kill.
+const TURN_START_TIMEOUT_MS = 90_000
 // `mailbox check` exits 0 on a complete read and 3 on a partial one: there is no board binary, a board
 // read failed or its output was unparseable, or the registry was unreadable, so the answers listed
 // may be a subset of what is released.
@@ -39,6 +52,7 @@ export const register: Register = (on) => {
   let turnStarts = 0
   let hasActivitySinceBeat = false
   let lastBeatAt = Number.NEGATIVE_INFINITY
+  let isInteractive = false
 
   // A main-loop turn starting means the session is no longer waiting on background work (FLOW-457):
   // clear what its last Stop recorded. The clear carries the instant the turn started, so it only
@@ -65,9 +79,28 @@ export const register: Register = (on) => {
               '--session',
               sessionId,
             ],
-            {
-              timeoutMs: CLEAR_TIMEOUT_MS,
-            }
+            { timeoutMs: WAIT_CLEAR_TIMEOUT_MS }
+          )
+        )
+        .catch(() => undefined)
+
+      // The board's turn outcome clears at the same instant. --interactive lets the
+      // turn's end open a board node for a session outside any workflow; a `-p` run never does.
+      void $.session
+        .id()
+        .then((sessionId) =>
+          $.process.run(
+            [
+              `${$.plugin.root}/bin/dashboard`,
+              'session',
+              'turn-start',
+              '--started-at',
+              turnStartedAt,
+              '--session',
+              sessionId,
+              ...(isInteractive ? ['--interactive'] : []),
+            ],
+            { timeoutMs: TURN_START_TIMEOUT_MS }
           )
         )
         .catch(() => undefined)
@@ -119,6 +152,7 @@ export const register: Register = (on) => {
 
   on('session.start', async ($, e, next) => {
     const started = await next(e)
+    isInteractive = e.isInteractive
     // A `-p` run or the SDK has nobody at the prompt to wake.
     if (!e.isInteractive) {
       return started

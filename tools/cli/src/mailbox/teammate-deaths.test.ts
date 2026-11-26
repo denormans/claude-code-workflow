@@ -1,9 +1,17 @@
 import { test, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, chmodSync, existsSync } from 'node:fs'
-import { spawnSync } from 'node:child_process'
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  readFileSync,
+  rmSync,
+  chmodSync,
+  existsSync,
+} from 'node:fs'
+import { spawn, spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { sessionGlobalScope, storePath } from '../workflow-store/store.ts'
 import {
@@ -11,7 +19,11 @@ import {
   scanTeammateDeaths,
   recordTeammateDeathsReported,
   formatTeammateDeath,
+  scanTeammatesNeverStarted,
+  recordTeammatesNeverStartedReported,
+  formatTeammateNeverStarted,
   parseAgentProcesses,
+  SPAWN_GRACE_MS,
   type RunningAgent,
 } from './teammate-deaths.ts'
 
@@ -308,6 +320,115 @@ test('no saved roster: a session that never saw its team still reports no team',
   assert.equal(scanTeammates(RAW, [])?.dissolved, false)
 })
 
+// What a teammate's own turn start writes into its lead's turn list (teammate-turns.ts).
+const writeStartedTurns = (rawId: string, pids: number[]): void => {
+  const path = storePath(sessionGlobalScope(rawId), 'teammate-turns.json')
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(
+    path,
+    JSON.stringify(
+      Object.fromEntries(
+        pids.map((pid, i) => [
+          `teammate-session-${i}`,
+          { label: `t${i}`, pid, startedAt: '2026-11-25T00:00:00.000Z' },
+        ])
+      )
+    )
+  )
+}
+
+const runningImpl: RunningAgent[] = [
+  { pid: 42, agentId: 'impl@session-abcdef12', teamName: 'session-abcdef12' },
+]
+
+test('never started: a running member past the grace with no turn is reported once', () => {
+  writeTeam(RAW, [{ name: 'impl', agentId: 'impl@session-abcdef12', joinedAt: NOW - 6 * 60_000 }])
+
+  const scan = scanTeammatesNeverStarted(RAW, NOW, runningImpl)
+
+  assert.equal(scan.unreported.length, 1)
+  assert.equal(
+    formatTeammateNeverStarted(scan.unreported[0]!),
+    '[team] teammate-never-started impl — impl@session-abcdef12 has a running process ' +
+      `(pid 42, joined ${new Date(NOW - 6 * 60_000).toISOString()}) but has recorded no turn ` +
+      'since it joined. If you have had any message from it since you spawned it, it did start ' +
+      'and this report is a missed write — ignore it. Otherwise end its process with ' +
+      '`kill 42`, then confirm it exited: `kill -0 42` fails once it is gone, so re-check for up ' +
+      'to 10 seconds, since a process handling SIGTERM can linger. If it is still running after ' +
+      'that, post a board blocker naming the pid. Once it is confirmed gone: if you were ' +
+      'waiting on its shutdown acknowledgment, the shutdown is complete — nothing else ' +
+      'needed; if its work is unfinished, respawn it with the same instructions — if the ' +
+      'respawn is reported teammate-never-started too, the client needs a restart.'
+  )
+
+  recordTeammatesNeverStartedReported(scan.all, RAW)
+  assert.deepEqual(scanTeammatesNeverStarted(RAW, NOW, runningImpl), {
+    all: scan.all,
+    unreported: [],
+  })
+})
+
+test('never started: a respawn under the same name reports again', () => {
+  writeTeam(RAW, [{ name: 'impl', agentId: 'impl@session-abcdef12', joinedAt: NOW - 6 * 60_000 }])
+  recordTeammatesNeverStartedReported(scanTeammatesNeverStarted(RAW, NOW, runningImpl).all, RAW)
+
+  writeTeam(RAW, [{ name: 'impl', agentId: 'impl@session-abcdef12', joinedAt: NOW - 5 * 60_000 }])
+
+  assert.equal(scanTeammatesNeverStarted(RAW, NOW, runningImpl).unreported.length, 1)
+})
+
+test('recorded: a running member whose pid has a turn entry is not reported', () => {
+  writeTeam(RAW, [{ name: 'impl', agentId: 'impl@session-abcdef12', joinedAt: NOW - 6 * 60_000 }])
+  writeStartedTurns(RAW, [42])
+
+  assert.deepEqual(scanTeammatesNeverStarted(RAW, NOW, runningImpl).all, [])
+})
+
+test('recorded: a turn entry for another pid does not count for this member', () => {
+  writeTeam(RAW, [{ name: 'impl', agentId: 'impl@session-abcdef12', joinedAt: NOW - 6 * 60_000 }])
+  writeStartedTurns(RAW, [41])
+
+  assert.equal(scanTeammatesNeverStarted(RAW, NOW, runningImpl).all.length, 1)
+})
+
+test('never started: inside the grace window is not reported', () => {
+  writeTeam(RAW, [
+    { name: 'impl', agentId: 'impl@session-abcdef12', joinedAt: NOW - SPAWN_GRACE_MS + 1 },
+  ])
+
+  assert.deepEqual(scanTeammatesNeverStarted(RAW, NOW, runningImpl).all, [])
+})
+
+test('never started: exactly at the grace boundary is reported', () => {
+  writeTeam(RAW, [
+    { name: 'impl', agentId: 'impl@session-abcdef12', joinedAt: NOW - SPAWN_GRACE_MS },
+  ])
+
+  assert.equal(scanTeammatesNeverStarted(RAW, NOW, runningImpl).all.length, 1)
+})
+
+test('never started: a member with no process is left to the dead-teammate report', () => {
+  writeTeam(RAW, [{ name: 'impl', agentId: 'impl@session-abcdef12', joinedAt: NOW - 6 * 60_000 }])
+
+  assert.deepEqual(scanTeammatesNeverStarted(RAW, NOW, []).all, [])
+})
+
+test('never started: an unreadable turn list reports nothing', () => {
+  writeTeam(RAW, [{ name: 'impl', agentId: 'impl@session-abcdef12', joinedAt: NOW - 6 * 60_000 }])
+  mkdirSync(storePath(sessionGlobalScope(RAW), 'teammate-turns.json'), { recursive: true })
+
+  assert.deepEqual(scanTeammatesNeverStarted(RAW, NOW, runningImpl).all, [])
+})
+
+test('never started: a malformed turn list reports nothing', () => {
+  writeTeam(RAW, [{ name: 'impl', agentId: 'impl@session-abcdef12', joinedAt: NOW - 6 * 60_000 }])
+  const path = storePath(sessionGlobalScope(RAW), 'teammate-turns.json')
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, JSON.stringify({ 'teammate-session-0': { label: 't0' } }))
+
+  assert.deepEqual(scanTeammatesNeverStarted(RAW, NOW, runningImpl).all, [])
+})
+
 test('argv: only the full teammate flag triple parses', () => {
   const psOutput = [
     '  101 /Users/x/.local/share/claude/versions/2.1.282 --agent-id impl-375@session-4a6e3605 --agent-name impl-375 --team-name session-4a6e3605 --agent-color blue',
@@ -372,6 +493,58 @@ const cliEnv = (): Record<string, string> => ({
 })
 
 const implMember = { name: 'impl', agentId: 'impl@session-abcdef12', joinedAt: NOW - 6 * 60_000 }
+
+test('CLI: mailbox check reports a running teammate with no recorded turn, then prints nothing on the next run', async () => {
+  const child = spawn(
+    process.execPath,
+    [
+      '-e',
+      'setInterval(() => {}, 1000)',
+      '--',
+      '--agent-id',
+      'impl@session-abcdef12',
+      '--agent-name',
+      'impl',
+      '--team-name',
+      'session-abcdef12',
+    ],
+    { stdio: 'ignore' }
+  )
+  try {
+    const member = {
+      name: 'impl',
+      agentId: 'impl@session-abcdef12',
+      joinedAt: Date.now() - 6 * 60_000,
+    }
+    writeTeam(RAW, [member])
+    const runCheck = () => {
+      const result = spawnSync(
+        process.execPath,
+        ['--experimental-transform-types', mainTsPath, 'mailbox', 'check', '--session', RAW],
+        { encoding: 'utf8', env: { ...process.env, ...cliEnv() }, timeout: 30_000 }
+      )
+      return { stdout: result.stdout, stderr: result.stderr, status: result.status }
+    }
+    const reportedKeys = (): unknown =>
+      JSON.parse(
+        readFileSync(
+          storePath(sessionGlobalScope(RAW), 'teammate-never-started-reported.json'),
+          'utf8'
+        )
+      )
+
+    assert.deepEqual(runCheck(), {
+      stdout: `${formatTeammateNeverStarted({ ...member, pid: child.pid! })}\n`,
+      stderr: '',
+      status: 0,
+    })
+    assert.deepEqual(reportedKeys(), [`${member.agentId}:${member.joinedAt}`])
+
+    assert.deepEqual(runCheck(), { stdout: '', stderr: '', status: 0 })
+  } finally {
+    child.kill()
+  }
+})
 
 const scanJson = (dissolved: boolean): string =>
   `${JSON.stringify(

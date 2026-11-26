@@ -2,13 +2,16 @@ import { test, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
-import { backgroundTasksFromStopPayload, runWait } from './background-wait.ts'
+import { backgroundTasksFromStopPayload, runWait, watchedPrTasks } from './background-wait.ts'
+import { watchPr } from '../pr-monitor/state.ts'
 import { upsertRegistryNode } from './registry.ts'
+import { teammateTurnStarted } from './teammate-turns.ts'
 import { getRequestedExitCode, setRequestedExitCode } from '../runtime-exit-code.ts'
+import { ensureDurableDir, sessionGlobalScope, storePath } from '../workflow-store/store.ts'
 
 const mainTsPath = fileURLToPath(new URL('../main.ts', import.meta.url))
 
@@ -16,7 +19,12 @@ let tmpDir: string
 let homeDir: string
 let rawId: string
 const saved: Record<string, string | undefined> = {}
-const ENV_KEYS = ['AI_WORKFLOW_APP_BIN', 'CLAUDE_CODE_SESSION_ID', 'HOME'] as const
+const ENV_KEYS = [
+  'AI_WORKFLOW_APP_BIN',
+  'CLAUDE_CODE_SESSION_ID',
+  'DASHBOARD_TEAMMATE_TURNS_LOCK_WAIT_MS',
+  'HOME',
+] as const
 
 beforeEach(() => {
   for (const k of ENV_KEYS) {
@@ -162,6 +170,59 @@ test('a payload of only teammates clears the wait instead of recording one', () 
   assert.equal(getRequestedExitCode(), 0)
 })
 
+test('a recorded wait includes each live busy teammate beside the payload’s own tasks', () => {
+  process.env.AI_WORKFLOW_APP_BIN = writeLoggingStub(0)
+  teammateTurnStarted(
+    rawId,
+    'mate-1',
+    { leadSessionId: rawId, label: 'impl', pid: process.pid },
+    '2026-11-24T10:00:00.000Z'
+  )
+
+  runWait(
+    undefined,
+    JSON.stringify({ background_tasks: [{ type: 'shell', command: 'pnpm test' }] })
+  )
+
+  assert.deepEqual(readCalls(), [
+    'session wait --id leaf-1 --tasks [{"type":"shell","label":"pnpm test"},{"type":"teammate","label":"impl"}]',
+  ])
+})
+
+test('watchedPrTasks names each watched PR', () => {
+  watchPr('7', 'a/b')
+  watchPr('3', 'a/b')
+
+  assert.deepEqual(watchedPrTasks(rawId), [
+    { type: 'pr-monitor', label: 'a/b#3' },
+    { type: 'pr-monitor', label: 'a/b#7' },
+  ])
+})
+
+test('watchedPrTasks is empty with no store', () => {
+  assert.deepEqual(watchedPrTasks(rawId), [])
+})
+
+test('runWait records a watched PR as a task beside the payload’s tasks and busy teammates', () => {
+  process.env.AI_WORKFLOW_APP_BIN = writeLoggingStub(0)
+  watchPr('7', 'a/b')
+  teammateTurnStarted(
+    rawId,
+    'mate-1',
+    { leadSessionId: rawId, label: 'impl', pid: process.pid },
+    '2026-11-24T10:00:00.000Z'
+  )
+
+  runWait(
+    undefined,
+    JSON.stringify({ background_tasks: [{ type: 'shell', command: 'pnpm test' }] })
+  )
+
+  assert.deepEqual(readCalls(), [
+    'session wait --id leaf-1 --tasks [{"type":"shell","label":"pnpm test"},{"type":"pr-monitor","label":"a/b#7"},{"type":"teammate","label":"impl"}]',
+  ])
+})
+
 test('records the tasks on the session’s own leaf', () => {
   process.env.AI_WORKFLOW_APP_BIN = writeLoggingStub(0)
   runWait(
@@ -232,6 +293,95 @@ test('--recorded-before limits a clear and is forwarded; an empty payload clear 
     `session wait --id leaf-1 --clear --recorded-before ${instant}`,
     'session wait --id leaf-1 --clear',
     `session wait --id leaf-1 --clear --recorded-before ${instant}`,
+  ])
+})
+
+const SHELL_STOP = JSON.stringify({ background_tasks: [{ type: 'shell', command: 'pnpm test' }] })
+const SHELL_TASKS = '[{"type":"shell","label":"pnpm test"}]'
+
+const teammateTurnStartsAfterStopAndClear = (recordedBefore: string | undefined): string[] => {
+  process.env.AI_WORKFLOW_APP_BIN = writeLoggingStub(0)
+
+  runWait(undefined, SHELL_STOP)
+  runWait(undefined, null, recordedBefore)
+  teammateTurnStarted(
+    rawId,
+    'mate-1',
+    { leadSessionId: rawId, label: 'impl', pid: process.pid },
+    '2026-11-24T10:00:00.000Z'
+  )
+
+  const busy: Record<string, { label: string }> = JSON.parse(
+    readFileSync(storePath(sessionGlobalScope(rawId), 'teammate-turns.json'), 'utf8')
+  )
+  assert.equal(busy['mate-1']?.label, 'impl', 'the teammate start was processed')
+  return readCalls()
+}
+
+test('a clear removes the Stop record, so a later teammate turn change does not restore its tasks', () => {
+  assert.deepEqual(teammateTurnStartsAfterStopAndClear(undefined), [
+    `session wait --id leaf-1 --tasks ${SHELL_TASKS}`,
+    'session wait --id leaf-1 --clear',
+  ])
+})
+
+test('a clear bounded after the Stop removes it', () => {
+  const after = '2999-01-01T00:00:00.000Z'
+  assert.deepEqual(teammateTurnStartsAfterStopAndClear(after), [
+    `session wait --id leaf-1 --tasks ${SHELL_TASKS}`,
+    'session wait --id leaf-1 --clear',
+  ])
+})
+
+test('an unbounded clear removes a Stop record whatever its timestamp', () => {
+  process.env.AI_WORKFLOW_APP_BIN = writeLoggingStub(0)
+  const scope = sessionGlobalScope(rawId)
+  const stopFile = storePath(scope, 'stop-tasks.json')
+  ensureDurableDir(dirname(stopFile))
+  writeFileSync(
+    stopFile,
+    `${JSON.stringify({ at: '2999-01-01T00:00:00.000Z', tasks: [{ type: 'shell', label: 'pnpm test' }] })}\n`
+  )
+
+  runWait(undefined, null)
+  teammateTurnStarted(
+    rawId,
+    'mate-1',
+    { leadSessionId: rawId, label: 'impl', pid: process.pid },
+    '2026-11-24T10:00:00.000Z'
+  )
+
+  assert.equal(existsSync(stopFile), false)
+  assert.equal(existsSync(storePath(scope, 'teammate-turns.json')), true)
+  assert.deepEqual(readCalls(), ['session wait --id leaf-1 --clear'])
+})
+
+test('a clear that cannot take the lead lock clears no leaf and keeps the Stop record', () => {
+  process.env.AI_WORKFLOW_APP_BIN = writeLoggingStub(0)
+  process.env.DASHBOARD_TEAMMATE_TURNS_LOCK_WAIT_MS = '200'
+  runWait(undefined, SHELL_STOP)
+  const scope = sessionGlobalScope(rawId)
+  const now = new Date().toISOString()
+  writeFileSync(
+    storePath(scope, 'teammate-turns.lock'),
+    JSON.stringify({ pid: process.pid, startedAt: now, heartbeatAt: now }),
+    { mode: 0o600 }
+  )
+
+  const stderr = captureStderr(() => runWait(undefined, null))
+
+  assert.equal(stderr, 'dashboard: teammate turns are locked by another writer; skipped\n')
+  assert.deepEqual(readCalls(), [`session wait --id leaf-1 --tasks ${SHELL_TASKS}`])
+  assert.equal(existsSync(storePath(scope, 'stop-tasks.json')), true)
+  assert.equal(getRequestedExitCode(), 0)
+})
+
+test('a clear bounded before the Stop keeps the Stop record for the next teammate re-record', () => {
+  const before = '2000-01-01T00:00:00.000Z'
+  assert.deepEqual(teammateTurnStartsAfterStopAndClear(before), [
+    `session wait --id leaf-1 --tasks ${SHELL_TASKS}`,
+    `session wait --id leaf-1 --clear --recorded-before ${before}`,
+    `session wait --id leaf-1 --tasks [{"type":"shell","label":"pnpm test"},{"type":"teammate","label":"impl"}]`,
   ])
 })
 

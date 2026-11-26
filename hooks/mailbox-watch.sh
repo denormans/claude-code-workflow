@@ -10,10 +10,12 @@ if command -v jq >/dev/null 2>&1; then
   SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null) || SESSION_ID=""
   STOP_ACTIVE=$(echo "$INPUT" | jq -r '.stop_hook_active // false' 2>/dev/null) || STOP_ACTIVE="false"
   PROMPT_ID=$(echo "$INPUT" | jq -r '.prompt_id // empty' 2>/dev/null) || PROMPT_ID=""
+  AGENT_ID=$(echo "$INPUT" | jq -r '.agent_id // empty' 2>/dev/null) || AGENT_ID=""
 else
   SESSION_ID=""
   STOP_ACTIVE="false"
   PROMPT_ID=""
+  AGENT_ID=""
 fi
 
 # Records the background work this turn ended on, so the board shows the session waiting rather than
@@ -22,6 +24,14 @@ fi
 # swallowed so a stop never fails.
 record_wait() {
   printf '%s' "$INPUT" | "${PLUGIN_ROOT}/bin/dashboard" session wait --session "$SESSION_ID" >/dev/null 2>&1 || true
+}
+
+# Records how the turn ended on the session's board node: finished, with its last message.
+# Before record_wait, so a teammate leaves its lead's busy list before its own wait is recorded. Not
+# for an in-process subagent, whose Stop is not the session's. Failures are swallowed.
+record_turn_end() {
+  [[ -n "$AGENT_ID" ]] && return 0
+  printf '%s' "$INPUT" | "${PLUGIN_ROOT}/bin/dashboard" session turn-end --outcome finished --session "$SESSION_ID" >/dev/null 2>&1 || true
 }
 
 [[ -z "$SESSION_ID" ]] && exit 0
@@ -34,15 +44,17 @@ PROMPT_ARGS=()
 
 # Loop guard: if we're already resuming from a Stop hook, let the session stop.
 if [[ "$STOP_ACTIVE" == "true" ]]; then
+  record_turn_end
   record_wait
   exit 0
 fi
 
-if ! GATE=$("${PLUGIN_ROOT}/bin/mailbox" stop-gate --session "$SESSION_ID" 2>/dev/null); then
+if ! GATE=$(printf '%s' "$INPUT" | "${PLUGIN_ROOT}/bin/mailbox" stop-gate --session "$SESSION_ID" --payload-stdin 2>/dev/null); then
   GATE='allow'
 fi
 DECISION=${GATE%%$'\n'*}
 if [[ "$DECISION" != "block" ]]; then
+  record_turn_end
   record_wait
   exit 0
 fi

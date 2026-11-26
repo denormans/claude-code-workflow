@@ -50,9 +50,14 @@ No exceptions: on a wake carrying `[dashboard] item <id> ...`, or after reading 
 
 ## 7. Parking
 
-The board must say you are waiting before you go quiet. A blocker you discovered and scoped is yours to work, not a handoff — post the blocking item before you park.
+The board must say you are waiting before you go quiet. When the wait needs the user — a
+decision, a credential, an approval — post the blocking item before you park; a blocker you
+discovered and scoped is yours to work, not a handoff. A wait something already armed will end —
+a watched PR, a pane-backed teammate whose turn is under way, a background task — posts nothing:
+the Stop hook records it as your wait, and an item for it would only land in the user's inbox
+asking nothing.
 
-**A stop-gate block naming no open item is an instruction to keep working, not to park.** End a turn only if you can name a specific pending thing and the event that will wake you — a teammate who owes you a reply, a background task that re-invokes you, or a monitor armed on a condition that can occur. **A usage-limit checkpoint is a park, and parks go on the board** — post what you were doing, the exact next step, and when the limit resets, before you go quiet — that prompt is the work in flight, the next step, and the reset time, nothing else: a sentence naming whose call the resume is, or explaining what a usage limit implies, is the padding `skills/board/references/escalation-contract.md` §Required question form forbids:
+**A stop-gate block naming no open item is an instruction to keep working, not to park.** End a turn only if you can name a specific pending thing and the event that will wake you — a teammate who owes you a reply, a background task that re-invokes you, or a monitor armed on a condition that can occur. **A usage-limit checkpoint goes on the board: nothing armed fires at the usage reset, so the item asks the user to resume** — post what you were doing, the exact next step, and when the limit resets, before you go quiet — that prompt is the work in flight, the next step, and the reset time, nothing else: a sentence naming whose call the resume is, or explaining what a usage limit implies, is the padding `skills/board/references/escalation-contract.md` §Required question form forbids:
 (`dashboard item add --type approval --approval-kind checkpoint --prompt "$(cat "<tmpfile>")"` — temp file, never a shell string; why: `references/dashboard-protocol.md` §2). See §7.
 
 ## 8. Info notes

@@ -39,11 +39,17 @@ const stopGateCommand = buildCommand({
   parameters: {
     flags: {
       session: sessionFlag,
+      'payload-stdin': {
+        kind: 'boolean',
+        default: false,
+        brief:
+          'Read the Stop hook payload from stdin, so a non-teammate background task it lists counts as a wait',
+      },
     },
     positional: { kind: 'tuple', parameters: [] },
   },
-  func(flags: { session?: string }) {
-    runStopGate(flags.session)
+  func(flags: { session?: string; 'payload-stdin': boolean }) {
+    runStopGate(flags.session, flags['payload-stdin'] ? readFileSync(0, 'utf8') : undefined)
   },
 })
 

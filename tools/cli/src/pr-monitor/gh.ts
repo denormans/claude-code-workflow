@@ -217,6 +217,9 @@ const detectCoderabbitSkipped = (comments: PrViewResult['comments']): boolean =>
 
 const CODERABBIT_REFUSAL_TEXT = 'Review rate limited'
 
+// GitHub's cap on the ids one GraphQL `nodes` query takes.
+const MAX_NODE_IDS = 100
+
 const SECONDS_PER_UNIT: Record<string, number> = { hour: 3600, minute: 60, second: 1 }
 
 // Every unit of the stated time counts, so `27 minutes and 4 seconds` is 1624 seconds, not 27 minutes.
@@ -244,60 +247,74 @@ export const parseCooloffMinutes = (body: string): number | null => {
 const isRefusalBody = (body: string): boolean =>
   body.includes(CODERABBIT_RATE_LIMITED_MARKER) || body.includes(CODERABBIT_REFUSAL_TEXT)
 
-// The newest rate-limit comment decides: when it states no time, an older stated time no longer
-// describes the reviewer, so there is no wait to act on. `gh pr view` returns every comment, so
-// a refusal anywhere on the PR is found.
-export const findNewestRefusalId = (comments: PrViewResult['comments']): string | undefined =>
-  comments.findLast((c) => c.author?.login === 'coderabbitai' && isRefusalBody(c.body))?.id
+// Every CodeRabbit refusal on the PR, oldest first. CodeRabbit edits its summary comment in place,
+// so creation order does not say which refusal is current. `gh pr view` returns every comment, so a
+// refusal anywhere on the PR is found.
+export const findRefusalIds = (comments: PrViewResult['comments']): string[] =>
+  comments
+    .filter((c) => c.author?.login === 'coderabbitai' && isRefusalBody(c.body))
+    .map((c) => c.id)
 
 export interface RefusalComment {
+  id: string
   body: string
   updatedAt: string
 }
 
-export interface RefusalCommentResult {
-  comment: RefusalComment | null
+export interface RefusalCommentsResult {
+  comments: RefusalComment[]
   fetchFailed: boolean
 }
 
-// `gh pr view` exposes only `createdAt`, and CodeRabbit edits these comments in place: the stated
-// wait runs from the last edit. The body and the edit time come from one node read, so an edit
-// cannot pair an old duration with a new time.
-export const fetchRefusalComment = (
-  commentId: string,
-  execGraphql: GraphqlExecutor = makeExecGhGraphql('fetchRefusalComment')
-): RefusalCommentResult => {
+// `gh pr view` exposes no edit time, and CodeRabbit edits these comments in place: the stated wait
+// runs from the last edit. Every body and edit time come from one node read, so an edit cannot pair
+// an old duration with a new time. `nodes` takes at most MAX_NODE_IDS ids: past that, this reads
+// the first refusal and the newest MAX_NODE_IDS - 1, skipping those in between.
+export const fetchRefusalComments = (
+  commentIds: string[],
+  execGraphql: GraphqlExecutor = makeExecGhGraphql('fetchRefusalComments')
+): RefusalCommentsResult => {
   try {
     const query = `
-      query($id: ID!) {
-        node(id: $id) {
-          ... on IssueComment { body updatedAt }
+      query($ids: [ID!]!) {
+        nodes(ids: $ids) {
+          ... on IssueComment { id body updatedAt }
         }
       }
     `
-    const output = execGraphql(['api', 'graphql', '-f', `query=${query}`, '-f', `id=${commentId}`])
-    const node = (
-      JSON.parse(output) as { data: { node: { body?: unknown; updatedAt?: unknown } | null } }
-    ).data.node
-    if (
-      typeof node?.body !== 'string' ||
-      typeof node.updatedAt !== 'string' ||
-      !Number.isFinite(Date.parse(node.updatedAt))
-    ) {
-      throw new Error(`fetchRefusalComment: no body and updatedAt for ${commentId}`)
-    }
+    const readIds =
+      commentIds.length > MAX_NODE_IDS
+        ? [commentIds[0], ...commentIds.slice(1 - MAX_NODE_IDS)]
+        : commentIds
+    const idArgs = readIds.flatMap((id) => ['-f', `ids[]=${id}`])
+    const output = execGraphql(['api', 'graphql', '-f', `query=${query}`, ...idArgs])
+    const { nodes } = (JSON.parse(output) as { data: { nodes: unknown[] } }).data
 
-    return { comment: { body: node.body, updatedAt: node.updatedAt }, fetchFailed: false }
+    return { comments: nodes.map(toRefusalComment), fetchFailed: false }
   } catch (error) {
-    console.error('PR Monitor: fetchRefusalComment failed', error)
-    recordFailure('fetchRefusalComment', error)
-    return { comment: null, fetchFailed: true }
+    console.error('PR Monitor: fetchRefusalComments failed', error)
+    recordFailure('fetchRefusalComments', error)
+    return { comments: [], fetchFailed: true }
   }
+}
+
+const toRefusalComment = (node: unknown): RefusalComment => {
+  const { id, body, updatedAt } = (node ?? {}) as Partial<Record<keyof RefusalComment, unknown>>
+  if (
+    typeof id !== 'string' ||
+    typeof body !== 'string' ||
+    typeof updatedAt !== 'string' ||
+    !Number.isFinite(Date.parse(updatedAt))
+  ) {
+    throw new Error(`fetchRefusalComments: a node lacks id, body or updatedAt (${id ?? 'no id'})`)
+  }
+
+  return { id, body, updatedAt }
 }
 
 export interface ReviewerWaitRead {
   wait: StatedReviewerWait | undefined
-  // The newest refusal when it states no time; null when there is none to report, undefined when
+  // The most recently edited refusal when it states no time; null when there is none to report, undefined when
   // the read failed and nothing is known.
   untimedRefusal: RefusalIdentity | null | undefined
   readFailed: boolean
@@ -305,32 +322,31 @@ export interface ReviewerWaitRead {
 
 // The comment read is optional: running out of time in it leaves the wait unread, not the poll.
 const readStatedReviewerWait = (comments: PrViewResult['comments']): ReviewerWaitRead => {
-  const commentId = findNewestRefusalId(comments)
-  if (commentId === undefined) {
+  const commentIds = findRefusalIds(comments)
+  if (commentIds.length === 0) {
     return { wait: undefined, untimedRefusal: null, readFailed: false }
   }
 
-  const { comment, fetchFailed } = runOptional(() => fetchRefusalComment(commentId))
-  if (fetchFailed || comment === null) {
+  // The refusal edited last decides. A failed read leaves the wait unknown rather than settling on
+  // a refusal that may not be the current one.
+  const { comments: read, fetchFailed } = runOptional(() => fetchRefusalComments(commentIds))
+  if (fetchFailed) {
     return { wait: undefined, untimedRefusal: undefined, readFailed: true }
   }
 
-  if (!isRefusalBody(comment.body)) {
+  const newest = read
+    .filter((comment) => isRefusalBody(comment.body))
+    .sort((a, b) => Date.parse(a.updatedAt) - Date.parse(b.updatedAt))
+    .at(-1)
+  if (newest === undefined) {
     return { wait: undefined, untimedRefusal: null, readFailed: false }
   }
 
-  const seconds = parseCooloffSeconds(comment.body)
+  const { id: commentId, body, updatedAt } = newest
+  const seconds = parseCooloffSeconds(body)
   return seconds === null
-    ? {
-        wait: undefined,
-        untimedRefusal: { commentId, updatedAt: comment.updatedAt },
-        readFailed: false,
-      }
-    : {
-        wait: { commentId, updatedAt: comment.updatedAt, seconds },
-        untimedRefusal: null,
-        readFailed: false,
-      }
+    ? { wait: undefined, untimedRefusal: { commentId, updatedAt }, readFailed: false }
+    : { wait: { commentId, updatedAt, seconds }, untimedRefusal: null, readFailed: false }
 }
 
 export const detectCoderabbitStatus = (comments: PrViewResult['comments']): CoderabbitDetection => {

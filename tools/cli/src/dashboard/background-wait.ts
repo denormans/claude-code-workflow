@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs'
-import { invokeDashboardBin, resolveDashboardBin } from './invoke.ts'
-import { loadRegistry, registryLeaves } from './registry.ts'
+import { resolveDashboardBin } from './invoke.ts'
 import { resolveRawSessionId } from './session-id.ts'
+import { clearLeadWait, leadStopped } from './teammate-turns.ts'
+import { loadWatchedFor } from '../pr-monitor/state.ts'
 import { setRequestedExitCode } from '../runtime-exit-code.ts'
 
 /** One piece of background work in the board's shape. */
@@ -12,20 +13,29 @@ export interface BackgroundTask {
 
 const LABEL_MAX = 120
 const TEAMMATE_TYPE = 'teammate'
+const WATCHED_PR_TASK_TYPE = 'pr-monitor'
 const LABEL_FIELDS = ['command', 'tool', 'name', 'description'] as const
 const SUBAGENT_LABEL_FIELDS = ['description', 'agent_type'] as const
 
 /**
  * Records the caller's background wait on its own board leaves, or clears it.
  *
- * `payload` is the Stop hook's JSON text; null means clear, and then `recordedBefore` (an ISO
- * instant) limits the clear to a wait recorded before it; a payload with `recordedBefore` is
- * refused. A payload with no tasks clears unconditionally. Only the session's own leaves are
+ * `payload` is the Stop hook's JSON text; null means clear; a payload with `recordedBefore` (an
+ * ISO instant) is refused. A payload is recorded through `leadStopped`: its tasks plus each live
+ * busy teammate, written under the lead's lock, cleared only when both are empty, and not written
+ * at all when the lock cannot be claimed in time. A clear is `clearLeadWait`, one locked step: it
+ * removes a recorded Stop older than `recordedBefore` (any Stop when there is none), so a later
+ * teammate turn change does not restore the cleared tasks, and clears every own leaf without the
+ * bound, which includes a teammate re-record written after the bound on top of that older Stop.
+ * With no such Stop it clears each own leaf, limited to a wait recorded before `recordedBefore`
+ * when one is given. A lock that cannot be claimed in time changes nothing. Only the session's own
+ * leaves are
  * touched, so a caller with no leaf of its own records nothing. A teammate has one only once the
  * board holds a node it owns (permission-hold.sh nests one under its lead when it first asks for a
  * permission); until then its Stop records nothing. It deliberately omits the lead's leaves, unlike
  * a heartbeat: a teammate's wait on the lead's node would collide with the lead's own record and
- * clear. Every board call is quiet, because a failed record must never fail the stop or the turn
+ * clear. A teammate's busy turns reach its lead's record through `teammate-turns.ts`, not through
+ * the payload. Every board call is quiet, because a failed record must never fail the stop or the turn
  * that triggered it.
  */
 export const runWait = (
@@ -44,24 +54,20 @@ export const runWait = (
     return
   }
 
-  let leaves: string[]
-  let tasks: BackgroundTask[]
   try {
-    leaves = registryLeaves(loadRegistry(resolveRawSessionId(session))).map(
-      (leaf) => leaf.internalId
-    )
-    tasks = payload === null ? [] : backgroundTasksFromStopPayload(JSON.parse(payload))
+    const rawId = resolveRawSessionId(session)
+    if (payload !== null) {
+      leadStopped(rawId, [
+        ...backgroundTasksFromStopPayload(JSON.parse(payload)),
+        ...watchedPrTasks(rawId),
+      ])
+      return
+    }
+
+    clearLeadWait(rawId, recordedBefore)
   } catch (err) {
     process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`)
     setRequestedExitCode(1)
-    return
-  }
-
-  const clearFlags =
-    recordedBefore !== undefined ? ['--clear', '--recorded-before', recordedBefore] : ['--clear']
-  const flags = tasks.length === 0 ? clearFlags : ['--tasks', JSON.stringify(tasks)]
-  for (const id of leaves) {
-    invokeDashboardBin(bin, ['session', 'wait', '--id', id, ...flags], { quiet: true })
   }
 }
 
@@ -90,6 +96,16 @@ export const backgroundTasksFromStopPayload = (payload: unknown): BackgroundTask
       return { type, label: clip(firstLabel(task) ?? type) }
     })
 }
+
+/**
+ * The PRs this session watches, as board tasks: a watched PR is a wait the wake mod answers, so a
+ * session parked on one is waiting on it, not idle. The label is the PR's own `owner/repo#N`.
+ */
+export const watchedPrTasks = (rawSessionId: string): BackgroundTask[] =>
+  loadWatchedFor(rawSessionId).map((pr) => ({
+    type: WATCHED_PR_TASK_TYPE,
+    label: clip(`${pr.repo}#${pr.prNumber}`),
+  }))
 
 const firstLabel = (task: Record<string, unknown>): string | undefined => {
   const fields = task.type === 'subagent' ? SUBAGENT_LABEL_FIELDS : LABEL_FIELDS

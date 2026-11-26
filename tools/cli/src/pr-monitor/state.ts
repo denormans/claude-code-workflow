@@ -739,6 +739,28 @@ export const loadWatched = (): WatchedPr[] =>
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([, pr]) => pr)
 
+// The PRs a given session watches, for a reader running outside that session's own process (the
+// Stop hook), which names the session by its raw id as monitor-deaths does. Read-only and lock-free.
+// A store that is absent, unreadable or unparseable reads as watching nothing: the Stop gate treats
+// a watched PR as a reason to stop quietly, so an unknown list must not grant one.
+export const loadWatchedFor = (rawSessionId: string): WatchedPr[] => {
+  let raw: string
+  try {
+    raw = readFileSync(join(storeDir(rawSessionId), 'state.json'), 'utf-8')
+  } catch {
+    return []
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as Partial<Store>
+    return Object.entries(parsed.watched ?? {})
+      .sort(([a], [b]) => a.localeCompare(b))
+      .flatMap(([, entry]) => normalizeWatched(entry) ?? [])
+  } catch {
+    return []
+  }
+}
+
 // The wedge counter. Both only touch an entry that still exists: a check whose snapshot predates a
 // `--stop` must not bring the PR back (FLOW-402 F9). recordUnknownPoll returns the new count and
 // the failure it stored, or null when the PR is no longer watched.

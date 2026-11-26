@@ -20,6 +20,7 @@ import {
   loadSelfCommentIds,
   loadState,
   loadWatched,
+  loadWatchedFor,
   markPolled,
   recordSelfComment,
   recordUnknownPoll,
@@ -2210,6 +2211,53 @@ test('a malformed watched entry is dropped and a bad counter reads as 0', () => 
     assert.deepEqual(
       watched.map((w) => [w.prNumber, w.consecutiveUnknown]),
       [['2', 0]]
+    )
+  })
+})
+
+test('loadWatchedFor reads another session’s watched list', () => {
+  withIsolatedStore('flow-476-other-session', () => {
+    watchPr('7', 'a/b')
+    watchPr('3', 'a/b')
+    const ownId = process.env.CLAUDE_CODE_SESSION_ID as string
+
+    process.env.CLAUDE_CODE_SESSION_ID = 'flow-476-reader'
+
+    assert.deepEqual(
+      loadWatchedFor(ownId).map((w) => `${w.repo}#${w.prNumber}`),
+      ['a/b#3', 'a/b#7']
+    )
+    assert.deepEqual(loadWatchedFor('flow-476-never-watched'), [])
+  })
+})
+
+test('loadWatchedFor returns [] for an unparseable store', () => {
+  withIsolatedStore('flow-476-unparseable', () => {
+    mkdirSync(storeDir(), { recursive: true })
+    writeFileSync(statePath(), '{')
+
+    assert.deepEqual(loadWatchedFor('flow-476-unparseable'), [])
+  })
+})
+
+test('loadWatchedFor skips an entry the poller skips', () => {
+  withIsolatedStore('flow-476-invalid-entry', () => {
+    const at = new Date().toISOString()
+    atomicWrite(
+      statePath(),
+      JSON.stringify({
+        prs: {},
+        watched: {
+          'a/b#1': { prNumber: '1', repo: '', registeredAt: at },
+          'a/b#2': { prNumber: '2', repo: 'a/b' },
+          'a/b#3': { prNumber: '3', repo: 'a/b', registeredAt: at },
+        },
+      })
+    )
+
+    assert.deepEqual(
+      loadWatchedFor('flow-476-invalid-entry').map((w) => w.prNumber),
+      ['3']
     )
   })
 })

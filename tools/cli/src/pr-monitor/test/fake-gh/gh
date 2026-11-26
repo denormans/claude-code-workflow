@@ -59,11 +59,44 @@ if [ "$1" = "api" ] && [ "$2" = "graphql" ]; then
       echo '{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}}'
       exit 0
       ;;
-    *"node(id:"*)
+    *"nodes(ids:"*)
+      # NODE_LOG, when set, gets one line per node read.
+      if [ -n "${NODE_LOG:-}" ]; then
+        echo "node read" >>"$NODE_LOG"
+      fi
       if [ -n "${NODE_SLEEP_SECS:-}" ]; then
         exec sleep "$NODE_SLEEP_SECS"
       fi
-      echo '{"data":{"node":{"body":"Review rate limited. Next review available in 7 minutes","updatedAt":"2026-01-01T00:00:00Z"}}}'
+      # The real gh refuses a read naming more than 100 ids.
+      id_count=0
+      for arg in "$@"; do
+        case "$arg" in
+          "ids[]="*) id_count=$((id_count + 1)) ;;
+        esac
+      done
+      if [ "$id_count" -gt 100 ]; then
+        echo "gh: You may not provide more than 100 node ids; you provided $id_count." >&2
+        exit 1
+      fi
+      # NODE_DIR, when set, holds one `<comment id>.json` node per comment; a read naming an id with
+      # no file there fails. Without it every id reads as the same stated refusal.
+      nodes=""
+      for arg in "$@"; do
+        case "$arg" in
+          "ids[]="*) node_id="${arg#*=}" ;;
+          *) continue ;;
+        esac
+        if [ -z "${NODE_DIR:-}" ]; then
+          node='{"id":"'"$node_id"'","body":"Review rate limited. Next review available in 7 minutes","updatedAt":"2026-01-01T00:00:00Z"}'
+        elif [ -f "$NODE_DIR/$node_id.json" ]; then
+          node="$(cat "$NODE_DIR/$node_id.json")"
+        else
+          echo "fake gh: no node payload for $node_id" >&2
+          exit 1
+        fi
+        nodes="${nodes:+$nodes,}$node"
+      done
+      echo '{"data":{"nodes":['"$nodes"']}}'
       exit 0
       ;;
     *)

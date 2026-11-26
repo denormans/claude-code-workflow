@@ -15,6 +15,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { loadState, saveState, stateFilePath } from '../dashboard/state.ts'
 import { loadRegistry, registryFilePath, upsertRegistryNode } from '../dashboard/registry.ts'
+import { runWait } from '../dashboard/background-wait.ts'
 import { stderrBeyondNodeWarnings } from '../testing/subprocess-stderr.ts'
 import { escapeRegExp } from '../check-refs/escape-regexp.ts'
 
@@ -598,7 +599,8 @@ const LEAD_SESSION = 'flow425-lead-session'
 
 const runCliAsTeammate = (
   args: string[],
-  env: NodeJS.ProcessEnv
+  env: NodeJS.ProcessEnv,
+  input?: string
 ): { stdout: string; stderr: string; status: number | null } => {
   const result = spawnSync(
     'bash',
@@ -620,6 +622,7 @@ const runCliAsTeammate = (
     ],
     {
       encoding: 'utf8',
+      ...(input !== undefined ? { input } : {}),
       env: {
         ...process.env,
         CLAUDE_CODE_SESSION_ID: 'flow425-teammate-session',
@@ -2579,4 +2582,110 @@ test('CLI: dashboard session refresh-return --session targets that session’s r
   assert.deepEqual(readCalls(tmpDir), [
     `link add --session ${target} --kind return --label iTerm --url agent-session://iterm/CAFE-F00D?claude=${target}&cwd=%2Fd`,
   ])
+})
+
+test('CLI FLOW-467: session turn-end and turn-start parse and reach the board on the session’s leaf', () => {
+  registerRootNode(rawId)
+  const stubBin = writeBranchingStub(tmpDir, '[]', '{}')
+  const psDir = join(tmpDir, 'ps-bin')
+  mkdirSync(psDir)
+  writeFileSync(join(psDir, 'ps'), '#!/usr/bin/env bash\necho "1 0 launchd"\n')
+  chmodSync(join(psDir, 'ps'), 0o755)
+  const env = {
+    AI_WORKFLOW_APP_BIN: stubBin,
+    CLAUDE_CODE_SESSION_ID: rawId,
+    PATH: `${psDir}:${process.env.PATH ?? ''}`,
+  }
+  const startedAt = '2026-11-24T10:00:00.000Z'
+
+  const start = runCli(
+    ['dashboard', 'session', 'turn-start', '--started-at', startedAt, '--session', rawId],
+    env
+  )
+  const end = spawnSync(
+    process.execPath,
+    [
+      '--experimental-transform-types',
+      mainTsPath,
+      'dashboard',
+      'session',
+      'turn-end',
+      '--outcome',
+      'failed',
+      '--session',
+      rawId,
+    ],
+    {
+      encoding: 'utf8',
+      input: JSON.stringify({ error: 'server_error', last_assistant_message: 'Stopped.' }),
+      env: { ...process.env, ...env },
+    }
+  )
+
+  assert.deepEqual(
+    [
+      start.status,
+      start.stdout,
+      stderrBeyondNodeWarnings(start.stderr),
+      end.status,
+      end.stdout,
+      stderrBeyondNodeWarnings(end.stderr),
+    ],
+    [0, '', '', 0, '', '']
+  )
+  assert.equal(
+    readRawCalls(tmpDir),
+    `session turn --id ${rawId} --clear --recorded-before ${startedAt}\n` +
+      `session turn --id ${rawId} --outcome failed --message server_error\n\nStopped.\n`
+  )
+})
+
+test('CLI FLOW-467: a teammate’s turn start adds it to its lead’s wait and its turn end removes it, opening no node', () => {
+  upsertRegistryNode(LEAD_SESSION, {
+    internalId: 'lead-node-1',
+    externalId: `${LEAD_SESSION}_aaaa1111`,
+    key: null,
+    parentId: null,
+  })
+  const stubBin = writeBranchingStub(tmpDir, '[]', '{}')
+  process.env.AI_WORKFLOW_APP_BIN = stubBin
+  runWait(
+    LEAD_SESSION,
+    JSON.stringify({ background_tasks: [{ type: 'shell', command: 'pnpm test' }] })
+  )
+
+  const start = runCliAsTeammate(
+    ['dashboard', 'session', 'turn-start', '--started-at', '2026-11-24T10:00:00.000Z'],
+    { AI_WORKFLOW_APP_BIN: stubBin }
+  )
+  const end = runCliAsTeammate(
+    ['dashboard', 'session', 'turn-end', '--outcome', 'finished'],
+    { AI_WORKFLOW_APP_BIN: stubBin },
+    JSON.stringify({ last_assistant_message: 'Done.' })
+  )
+
+  assert.deepEqual(
+    [start.status, start.stdout, start.stderr, end.status, end.stdout, end.stderr],
+    [0, '', '', 0, '', '']
+  )
+  const shell = '{"type":"shell","label":"pnpm test"}'
+  assert.deepEqual(readCalls(tmpDir), [
+    `session wait --id lead-node-1 --tasks [${shell}]`,
+    `session wait --id lead-node-1 --tasks [${shell},{"type":"teammate","label":"impl"}]`,
+    `session wait --id lead-node-1 --tasks [${shell}]`,
+  ])
+})
+
+test('CLI FLOW-467: session turn-end refuses an --outcome outside finished and failed at parse time', () => {
+  const { stdout, stderr, status } = runCli([
+    'dashboard',
+    'session',
+    'turn-end',
+    '--outcome',
+    'bogus',
+  ])
+
+  assert.equal(status, 252, "exits with Stricli's flag-parse error code")
+  assert.equal(stdout, '')
+  assert.equal(stderrBeyondNodeWarnings(stderr), 'Expected "bogus" to be one of (finished|failed)')
 })

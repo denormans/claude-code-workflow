@@ -110,8 +110,8 @@ GATE_OUTPUT=allow run_hook "$ROOT1" "{\"session_id\":\"s1\",$TASKS}"
 check "1: exit 0 on an allowed stop" "0" "$HOOK_EXIT"
 check "1: stdout is empty on an allowed stop" "0" "$(bytes "$HOOK_OUT_FILE")"
 check "1: stderr is empty on an allowed stop" "0" "$(bytes "$HOOK_ERR_FILE")"
-check "1: the gate is consulted, then the wait is recorded with the payload piped" \
-  "mailbox turn-succeeded --session s1"$'\n'"mailbox stop-gate --session s1"$'\n'"dashboard session wait --session s1"$'\n'"{\"session_id\":\"s1\",$TASKS}" \
+check "1: the gate is consulted, then the turn end, then the wait are recorded with the payload piped" \
+  "mailbox turn-succeeded --session s1"$'\n'"mailbox stop-gate --session s1 --payload-stdin"$'\n'"dashboard session turn-end --outcome finished --session s1"$'\n'"{\"session_id\":\"s1\",$TASKS}"$'\n'"dashboard session wait --session s1"$'\n'"{\"session_id\":\"s1\",$TASKS}" \
   "$(calls_log "$ROOT1")"
 
 # --- 2: blocked stop does not record --------------------------------------------------------------
@@ -122,7 +122,7 @@ check "2: a blocked stop emits exactly the block decision" \
   $'{\n  "decision": "block",\n  "reason": "keep going"\n}' "$(cat "$HOOK_OUT_FILE")"
 check "2: a blocked stop exits 0 with empty stderr" "0:0" "$HOOK_EXIT:$(bytes "$HOOK_ERR_FILE")"
 check "2: a blocked stop clears the failed turn, consults the gate and records no wait" \
-  "mailbox turn-succeeded --session s2"$'\n'"mailbox stop-gate --session s2" \
+  "mailbox turn-succeeded --session s2"$'\n'"mailbox stop-gate --session s2 --payload-stdin" \
   "$(calls_log "$ROOT2")"
 
 # --- 3: stop_hook_active with a session records, without consulting the mailbox ------------------
@@ -130,7 +130,7 @@ ROOT3="$TMP_ROOT/c3"
 make_root "$ROOT3"
 GATE_OUTPUT=allow run_hook "$ROOT3" "{\"session_id\":\"s3\",\"stop_hook_active\":true,$TASKS}"
 check "3: a stop_hook_active stop clears the failed turn and records the wait without consulting the gate" \
-  "mailbox turn-succeeded --session s3"$'\n'"dashboard session wait --session s3"$'\n'"{\"session_id\":\"s3\",\"stop_hook_active\":true,$TASKS}" \
+  "mailbox turn-succeeded --session s3"$'\n'"dashboard session turn-end --outcome finished --session s3"$'\n'"{\"session_id\":\"s3\",\"stop_hook_active\":true,$TASKS}"$'\n'"dashboard session wait --session s3"$'\n'"{\"session_id\":\"s3\",\"stop_hook_active\":true,$TASKS}" \
   "$(calls_log "$ROOT3")"
 
 # --- 4: no session id -> no dashboard call, empty stdout ------------------------------------------
@@ -148,7 +148,7 @@ DASH_EXIT=1 GATE_OUTPUT=allow run_hook "$ROOT5" "{\"session_id\":\"s5\",$TASKS}"
 check "5: exit 0 when the dashboard exits 1" "0" "$HOOK_EXIT"
 check "5: stdout and stderr are empty when the dashboard exits 1" "0:0" "$(bytes "$HOOK_OUT_FILE"):$(bytes "$HOOK_ERR_FILE")"
 check "5: the failing dashboard was called with the payload" \
-  "mailbox turn-succeeded --session s5"$'\n'"mailbox stop-gate --session s5"$'\n'"dashboard session wait --session s5"$'\n'"{\"session_id\":\"s5\",$TASKS}" \
+  "mailbox turn-succeeded --session s5"$'\n'"mailbox stop-gate --session s5 --payload-stdin"$'\n'"dashboard session turn-end --outcome finished --session s5"$'\n'"{\"session_id\":\"s5\",$TASKS}"$'\n'"dashboard session wait --session s5"$'\n'"{\"session_id\":\"s5\",$TASKS}" \
   "$(calls_log "$ROOT5")"
 
 # --- 6: a failing stop-gate is treated as allow and records ---------------------------------------
@@ -157,7 +157,7 @@ make_root "$ROOT6"
 GATE_EXIT=1 GATE_OUTPUT="" run_hook "$ROOT6" "{\"session_id\":\"s6\",$TASKS}"
 check "6: exit 0 when the stop-gate fails" "0" "$HOOK_EXIT"
 check "6: a failing stop-gate still records the wait" \
-  "mailbox turn-succeeded --session s6"$'\n'"mailbox stop-gate --session s6"$'\n'"dashboard session wait --session s6"$'\n'"{\"session_id\":\"s6\",$TASKS}" \
+  "mailbox turn-succeeded --session s6"$'\n'"mailbox stop-gate --session s6 --payload-stdin"$'\n'"dashboard session turn-end --outcome finished --session s6"$'\n'"{\"session_id\":\"s6\",$TASKS}"$'\n'"dashboard session wait --session s6"$'\n'"{\"session_id\":\"s6\",$TASKS}" \
   "$(calls_log "$ROOT6")"
 
 # --- 7: the stopped prompt's id reaches turn-succeeded --------------------------------------------
@@ -165,8 +165,16 @@ ROOT7="$TMP_ROOT/c7"
 make_root "$ROOT7"
 GATE_OUTPUT=allow run_hook "$ROOT7" "{\"session_id\":\"s7\",\"prompt_id\":\"p-7\",$TASKS}"
 check "7: the Stop payload's prompt id is passed to turn-succeeded" \
-  "mailbox turn-succeeded --session s7 --prompt-id p-7"$'\n'"mailbox stop-gate --session s7"$'\n'"dashboard session wait --session s7"$'\n'"{\"session_id\":\"s7\",\"prompt_id\":\"p-7\",$TASKS}" \
+  "mailbox turn-succeeded --session s7 --prompt-id p-7"$'\n'"mailbox stop-gate --session s7 --payload-stdin"$'\n'"dashboard session turn-end --outcome finished --session s7"$'\n'"{\"session_id\":\"s7\",\"prompt_id\":\"p-7\",$TASKS}"$'\n'"dashboard session wait --session s7"$'\n'"{\"session_id\":\"s7\",\"prompt_id\":\"p-7\",$TASKS}" \
   "$(calls_log "$ROOT7")"
+
+# --- 8: an in-process subagent's stop records the wait but not a turn end -------------------------
+ROOT8="$TMP_ROOT/c8"
+make_root "$ROOT8"
+GATE_OUTPUT=allow run_hook "$ROOT8" "{\"session_id\":\"s8\",\"agent_id\":\"a-8\",$TASKS}"
+check "8: a payload with an agent_id records the wait and no turn end" \
+  "mailbox turn-succeeded --session s8"$'\n'"mailbox stop-gate --session s8 --payload-stdin"$'\n'"dashboard session wait --session s8"$'\n'"{\"session_id\":\"s8\",\"agent_id\":\"a-8\",$TASKS}" \
+  "$(calls_log "$ROOT8")"
 
 echo
 echo "Passed: $PASS  Failed: $FAIL"

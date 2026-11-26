@@ -24,6 +24,7 @@ const STUB_MAILBOX = [
   '#!/usr/bin/env bash',
   'echo "$@" >> "$(dirname "$0")/calls.log"',
   'if [[ "$1" == "stop-gate" ]]; then',
+  '  cat > "$(dirname "$0")/stop-gate-stdin.log"',
   // Crash AFTER printing partial output — reproduces a gate that gets partway through emitting
   // block\n<reason> and then dies (a real crash mid-write, not a clean "nothing printed at all"
   // failure). This is the case a naive `|| printf allow` fails CLOSED on: its output gets
@@ -158,5 +159,21 @@ test('hook: calls stop-gate with --session and no --watch-command', () => {
   const calls = readFileSync(join(pluginRoot, 'bin', 'calls.log'), 'utf-8')
     .trim()
     .split('\n')
-  assert.deepEqual(calls, ['turn-succeeded --session sid-5', 'stop-gate --session sid-5'])
+  assert.deepEqual(calls, [
+    'turn-succeeded --session sid-5',
+    'stop-gate --session sid-5 --payload-stdin',
+  ])
+})
+
+test('hook: passes its Stop payload to stop-gate on stdin', () => {
+  const input = {
+    session_id: 'sid-7',
+    stop_hook_active: false,
+    background_tasks: [{ type: 'shell', command: 'sleep 100' }],
+  }
+
+  runHook(input)
+
+  const received = readFileSync(join(pluginRoot, 'bin', 'stop-gate-stdin.log'), 'utf-8')
+  assert.equal(received, JSON.stringify(input))
 })

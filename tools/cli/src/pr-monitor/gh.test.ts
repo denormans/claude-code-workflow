@@ -1,6 +1,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   CODERABBIT_PAUSED_MARKER,
@@ -15,8 +17,8 @@ import {
   paginateConnection,
   parseCooloffMinutes,
   parseCooloffSeconds,
-  fetchRefusalComment,
-  findNewestRefusalId,
+  fetchRefusalComments,
+  findRefusalIds,
   resolvePrState,
   toPersistedReview,
   toReviewThreads,
@@ -55,7 +57,7 @@ test('parseCooloffMinutes sums every unit of a compound time', () => {
   )
 })
 
-test('findNewestRefusalId follows the newest rate-limit comment, however far back', () => {
+test('findRefusalIds lists every CodeRabbit refusal oldest first, however far back', () => {
   const comment = (id: string, body: string, login = 'coderabbitai') => ({
     id,
     author: { login },
@@ -64,44 +66,54 @@ test('findNewestRefusalId follows the newest rate-limit comment, however far bac
   const stated = `${CODERABBIT_RATE_LIMITED_MARKER}\nNext included review available in 21 minutes`
   const refusal = 'Review rate limited. Please try again later.'
 
-  assert.equal(findNewestRefusalId([comment('a', stated)]), 'a')
-  assert.equal(findNewestRefusalId([comment('a', stated), comment('b', refusal)]), 'b')
-  assert.equal(findNewestRefusalId([comment('a', refusal), comment('b', stated)]), 'b')
-  assert.equal(findNewestRefusalId([comment('a', stated, 'someone')]), undefined)
-  assert.equal(findNewestRefusalId([]), undefined)
+  assert.deepEqual(findRefusalIds([comment('a', stated)]), ['a'])
+  assert.deepEqual(findRefusalIds([comment('a', stated), comment('b', refusal)]), ['a', 'b'])
+  assert.deepEqual(findRefusalIds([comment('a', refusal), comment('b', stated)]), ['a', 'b'])
+  assert.deepEqual(findRefusalIds([comment('a', stated, 'someone')]), [])
+  assert.deepEqual(findRefusalIds([]), [])
 
   const chatter = Array.from({ length: 60 }, (_, i) => comment(`x${i}`, `later ${i}`, 'someone'))
-  assert.equal(
-    findNewestRefusalId([comment('a', stated), ...chatter]),
-    'a',
+  assert.deepEqual(
+    findRefusalIds([comment('a', stated), ...chatter]),
+    ['a'],
     'a refusal followed by many comments was not found'
   )
 })
 
-test('fetchRefusalComment reads body and edit time in one node read and reports a failed read', () => {
+test('fetchRefusalComments reads bodies and edit times in one node read and reports a failed read', () => {
+  const node = {
+    id: 'IC_1',
+    body: 'Next review available in 7 minutes',
+    updatedAt: '2026-01-01T00:07:00Z',
+  }
   const calls: string[][] = []
-  const ok = fetchRefusalComment('IC_1', (args) => {
+  const ok = fetchRefusalComments(['IC_1'], (args) => {
     calls.push(args)
-    return JSON.stringify({
-      data: {
-        node: { body: 'Next review available in 7 minutes', updatedAt: '2026-01-01T00:07:00Z' },
-      },
-    })
+    return JSON.stringify({ data: { nodes: [node] } })
   })
-  assert.deepEqual(ok, {
-    comment: { body: 'Next review available in 7 minutes', updatedAt: '2026-01-01T00:07:00Z' },
-    fetchFailed: false,
-  })
+  assert.deepEqual(ok, { comments: [node], fetchFailed: false })
   assert.equal(calls.length, 1, 'the body and the edit time were read separately')
-  assert.ok(calls[0].includes('id=IC_1'), 'the comment id was not passed to the query')
+  assert.ok(calls[0].includes('ids[]=IC_1'), 'the comment id was not passed to the query')
 
-  const failed = fetchRefusalComment('IC_1', () => {
+  const failed = fetchRefusalComments(['IC_1'], () => {
     throw new Error('gh: 502')
   })
-  assert.deepEqual(failed, { comment: null, fetchFailed: true })
+  assert.deepEqual(failed, { comments: [], fetchFailed: true })
 
-  const missing = fetchRefusalComment('IC_1', () => JSON.stringify({ data: { node: null } }))
-  assert.deepEqual(missing, { comment: null, fetchFailed: true })
+  const missing = fetchRefusalComments(['IC_1', 'IC_2'], () =>
+    JSON.stringify({ data: { nodes: [node, null] } })
+  )
+  assert.deepEqual(missing, { comments: [], fetchFailed: true })
+
+  const overCap: string[] = []
+  fetchRefusalComments(
+    Array.from({ length: 101 }, (_, i) => `IC_${i}`),
+    (args) => {
+      overCap.push(...args.filter((arg) => arg.startsWith('ids[]=')))
+      return JSON.stringify({ data: { nodes: [] } })
+    }
+  )
+  assert.deepEqual([overCap.length, overCap.at(-1)], [100, 'ids[]=IC_100'])
 })
 
 test('parseCooloffMinutes returns null when unparseable', () => {
@@ -513,6 +525,124 @@ test('fetchPrState takes the wait from the node body, not the list body, so an e
     JSON.stringify([{ commentId: 'IC_1', updatedAt: '2026-01-01T00:00:00Z', seconds: 420 }, null]),
     'the duration came from the list body, not the node body read with the edit time'
   )
+})
+
+const SUMMARY_NODE = {
+  id: 'IC_summary',
+  body: 'Review rate limited. Next included review available in 42 minutes',
+  updatedAt: '2026-11-25T06:05:29Z',
+}
+const REPLY_NODE = {
+  id: 'IC_reply',
+  body: 'Review rate limited. Next review available in 59 minutes',
+  updatedAt: '2026-11-25T04:48:20Z',
+}
+
+// Two refusals whose creation order (summary first) and edit order (summary last) disagree. The
+// summary is a refusal by marker, the reply by text.
+const twoRefusalComments = JSON.stringify([
+  {
+    id: 'IC_summary',
+    author: { login: 'coderabbitai' },
+    body: `${CODERABBIT_RATE_LIMITED_MARKER}\nstale list body`,
+  },
+  { id: 'IC_reply', author: { login: 'coderabbitai' }, body: 'Review rate limited. Try again.' },
+])
+
+const runWithNodes = async (
+  nodes: Array<{ id: string; body: string; updatedAt: string }>,
+  comments: string = twoRefusalComments
+) => {
+  const dir = mkdtempSync(join(tmpdir(), 'gh-nodes-'))
+  const nodeLog = join(dir, 'node-reads')
+  try {
+    for (const node of nodes) {
+      writeFileSync(join(dir, `${node.id}.json`), JSON.stringify(node))
+    }
+    const result = await runFetchFailureChild({
+      ...process.env,
+      PATH: `${FAKE_GH_DIR}:${process.env.PATH}`,
+      COMMENTS_JSON: comments,
+      NODE_DIR: dir,
+      NODE_LOG: nodeLog,
+      REPORT_REVIEWER_WAIT: '1',
+      REPORT_OPTIONAL_READS: '1',
+    })
+    const nodeReads = readFileSync(nodeLog, 'utf-8').trim().split('\n').length
+    return { ...result, nodeReads }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+test('three refusals are read in one node call', async () => {
+  const ids = ['IC_first', 'IC_second', 'IC_third']
+  const comments = JSON.stringify(
+    ids.map((id) => ({ id, author: { login: 'coderabbitai' }, body: 'Review rate limited.' }))
+  )
+  const nodes = ids.map((id, i) => ({
+    id,
+    body: `Review rate limited. Next review available in ${i + 1} minutes`,
+    updatedAt: ['2026-11-25T04:00:00Z', '2026-11-25T06:00:00Z', '2026-11-25T05:00:00Z'][i],
+  }))
+
+  const { code, stdout, stderr, nodeReads } = await runWithNodes(nodes, comments)
+
+  assert.equal(code, 0, stderr)
+  assert.equal(nodeReads, 1, 'the number of node reads grew with the number of refusals')
+  const [, , reviewerWait] = stdout.split('\n')
+  assert.equal(
+    reviewerWait,
+    JSON.stringify([
+      { commentId: 'IC_second', updatedAt: '2026-11-25T06:00:00Z', seconds: 120 },
+      null,
+    ])
+  )
+})
+
+test('past the node-id cap the first refusal still states the wait', async () => {
+  const ids = Array.from({ length: 101 }, (_, i) => `IC_${i}`)
+  const comments = JSON.stringify(
+    ids.map((id) => ({ id, author: { login: 'coderabbitai' }, body: 'Review rate limited.' }))
+  )
+  const nodes = ids.map((id, i) => ({
+    id,
+    body: `Review rate limited. Next review available in ${i + 1} minutes`,
+    updatedAt: i === 0 ? '2026-11-25T06:00:00Z' : '2026-11-25T04:00:00Z',
+  }))
+
+  const { code, stdout, stderr } = await runWithNodes(nodes, comments)
+
+  assert.equal(code, 0, stderr)
+  const [, , reviewerWait] = stdout.split('\n')
+  assert.equal(
+    reviewerWait,
+    JSON.stringify([{ commentId: 'IC_0', updatedAt: '2026-11-25T06:00:00Z', seconds: 60 }, null]),
+    stderr
+  )
+})
+
+test('the most recently edited refusal states the wait', async () => {
+  const { code, stdout, stderr } = await runWithNodes([SUMMARY_NODE, REPLY_NODE])
+
+  assert.equal(code, 0, stderr)
+  const [, , reviewerWait] = stdout.split('\n')
+  assert.equal(
+    reviewerWait,
+    JSON.stringify([
+      { commentId: 'IC_summary', updatedAt: '2026-11-25T06:05:29Z', seconds: 2520 },
+      null,
+    ])
+  )
+})
+
+test('a failed read of any refusal leaves the wait unknown', async () => {
+  const { code, stdout, stderr } = await runWithNodes([REPLY_NODE])
+
+  assert.equal(code, 0, stderr)
+  const [, unread, reviewerWait] = stdout.split('\n')
+  assert.equal(reviewerWait, JSON.stringify([null, null]))
+  assert.equal(unread, '[[],true]')
 })
 
 // --- Pagination (FLOW-226) ---

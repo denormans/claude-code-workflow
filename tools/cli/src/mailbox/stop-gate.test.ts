@@ -11,13 +11,15 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { spawnSync } from 'node:child_process'
 
 import { runStopGate, MAX_BLOCKS, hasPendingWork, isSessionLive } from './stop-gate.ts'
 import { saveState as saveDashboardState, stateFilePath, hashId } from '../dashboard/state.ts'
 import { pollTargets } from './check.ts'
 import { upsertRegistryNode, registryFilePath } from '../dashboard/registry.ts'
 import { resolveSessionId } from '../dashboard/session-id.ts'
-import { load, sessionScope, storePath } from '../workflow-store/store.ts'
+import { load, sessionGlobalScope, sessionScope, storePath } from '../workflow-store/store.ts'
+import { storeDir } from '../pr-monitor/state.ts'
 
 // A stub ai-workflow-app that answers 'session list' with the given JSON; all other calls
 // emit '{}'. Mirrors mailbox.test.ts's writeAnswersStub/boardRow pattern.
@@ -101,6 +103,8 @@ const captureStdout = (fn: () => void): string => {
 // Full stdout (`allow`, or `block\n<reason>`), trailing newline stripped.
 const gate = (session?: string): string =>
   captureStdout(() => runStopGate(session)).replace(/\n$/, '')
+const gateWith = (session: string, payload: string): string =>
+  captureStdout(() => runStopGate(session, payload)).replace(/\n$/, '')
 // Just the decision line, for tests that don't care about the reason text.
 const decision = (session?: string): string => gate(session).split('\n')[0]!
 // ---------------------------------------------------------------------------
@@ -316,6 +320,164 @@ test('stop-gate: an idle conversation node allows', () => {
   )
 
   assert.equal(gate(sessionId), 'allow')
+})
+
+// A registered node with no open and no released items, whose pr-monitor store holds the given
+// watched entries.
+const plantLiveNode = (name: string, watched: Record<string, unknown>): string => {
+  const uniqueId = tmpDir.replace(/[^a-zA-Z0-9]/g, '-').slice(-32)
+  const id = `stop-gate-${name}-${uniqueId}`
+  sessionId = id
+  process.env.CLAUDE_CODE_SESSION_ID = id
+  saveDashboardState(id, { registered: true, phase: 'review', openItemIds: [] })
+  const dir = storeDir(id)
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'state.json'), JSON.stringify({ prs: {}, watched }))
+  process.env.AI_WORKFLOW_APP_BIN = writeBoardStub(
+    tmpDir,
+    JSON.stringify([boardRow({ id, externalId: id, lifecycle: 'active' })])
+  )
+  return id
+}
+
+const watchedEntry = {
+  'a/b#7': {
+    prNumber: '7',
+    repo: 'a/b',
+    registeredAt: '2026-01-01T00:00:00.000Z',
+    consecutiveUnknown: 0,
+  },
+}
+
+test('stop-gate: allows a stop when the session watches a PR', () => {
+  const id = plantLiveNode('watching', watchedEntry)
+
+  assert.equal(gate(id), 'allow')
+})
+
+test('stop-gate: still blocks when the session watches no PR', () => {
+  const id = plantLiveNode('not-watching', {})
+
+  const out = gate(id)
+
+  assert.equal(out.split('\n')[0], 'block')
+  assert.ok(out.includes('Nothing is pending'))
+})
+
+test('stop-gate: blocks on a released item even when a PR is watched', () => {
+  const id = plantLiveNode('watching-released', watchedEntry)
+  saveDashboardState(id, { registered: true, phase: 'review', openItemIds: ['item-abc'] })
+  process.env.AI_WORKFLOW_APP_BIN = writeBoardStubWithAnswers(
+    tmpDir,
+    JSON.stringify([boardRow({ id, externalId: id, lifecycle: 'active' })]),
+    JSON.stringify([{ id: 'item-abc', type: 'question', response: 'yes' }])
+  )
+
+  assert.equal(gate(id).split('\n')[0], 'block')
+})
+
+const plantTeammateTurns = (id: string, turns: Record<string, unknown>): void => {
+  const path = storePath(sessionGlobalScope(id), 'teammate-turns.json')
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, `${JSON.stringify(turns)}\n`)
+}
+
+const exitedPid = (): number => {
+  const child = spawnSync(process.execPath, ['-e', ''])
+  assert.ok(child.pid !== undefined)
+  return child.pid
+}
+
+const STARTED_AT = '2026-11-25T10:00:00.000Z'
+
+test('stop-gate: allows a stop when a teammate’s turn is under way', () => {
+  const id = plantLiveNode('teammate-busy', {})
+  plantTeammateTurns(id, {
+    'mate-1': { label: 'impl', pid: process.pid, startedAt: STARTED_AT },
+  })
+
+  assert.equal(gate(id), 'allow')
+})
+
+test('stop-gate: still blocks when every teammate’s turn has ended', () => {
+  const id = plantLiveNode('teammate-ended', {})
+  plantTeammateTurns(id, {
+    'mate-1': {
+      label: 'impl',
+      pid: process.pid,
+      startedAt: STARTED_AT,
+      endedAt: '2026-11-25T10:05:00.000Z',
+    },
+  })
+
+  const out = gate(id)
+
+  assert.equal(out.split('\n')[0], 'block')
+  assert.ok(out.includes('Nothing is pending'))
+})
+
+test('stop-gate: still blocks when the busy teammate’s process has exited', () => {
+  const id = plantLiveNode('teammate-exited', {})
+  plantTeammateTurns(id, {
+    'mate-1': { label: 'impl', pid: exitedPid(), startedAt: STARTED_AT },
+  })
+
+  assert.equal(gate(id).split('\n')[0], 'block')
+})
+
+test('stop-gate: blocks on a released item even when a teammate is busy', () => {
+  const id = plantLiveNode('teammate-released', {})
+  plantTeammateTurns(id, {
+    'mate-1': { label: 'impl', pid: process.pid, startedAt: STARTED_AT },
+  })
+  saveDashboardState(id, { registered: true, phase: 'review', openItemIds: ['item-abc'] })
+  process.env.AI_WORKFLOW_APP_BIN = writeBoardStubWithAnswers(
+    tmpDir,
+    JSON.stringify([boardRow({ id, externalId: id, lifecycle: 'active' })]),
+    JSON.stringify([{ id: 'item-abc', type: 'question', response: 'yes' }])
+  )
+
+  assert.equal(gate(id).split('\n')[0], 'block')
+})
+
+const SHELL_TASK_PAYLOAD = JSON.stringify({
+  background_tasks: [{ type: 'shell', command: 'sleep 100' }],
+})
+
+test('stop-gate: allows a stop when the Stop payload lists a background task', () => {
+  const id = plantLiveNode('background-task', {})
+
+  assert.equal(gateWith(id, SHELL_TASK_PAYLOAD), 'allow')
+})
+
+test('stop-gate: still blocks when the Stop payload lists only a teammate', () => {
+  const id = plantLiveNode('background-teammate', {})
+
+  const out = gateWith(
+    id,
+    JSON.stringify({ background_tasks: [{ type: 'teammate', name: 'impl' }] })
+  )
+
+  assert.equal(out.split('\n')[0], 'block')
+  assert.ok(out.includes('Nothing is pending'))
+})
+
+test('stop-gate: still blocks when the Stop payload is not JSON', () => {
+  const id = plantLiveNode('background-not-json', {})
+
+  assert.equal(gateWith(id, '{').split('\n')[0], 'block')
+})
+
+test('stop-gate: blocks on a released item even when a background task is listed', () => {
+  const id = plantLiveNode('background-released', {})
+  saveDashboardState(id, { registered: true, phase: 'review', openItemIds: ['item-abc'] })
+  process.env.AI_WORKFLOW_APP_BIN = writeBoardStubWithAnswers(
+    tmpDir,
+    JSON.stringify([boardRow({ id, externalId: id, lifecycle: 'active' })]),
+    JSON.stringify([{ id: 'item-abc', type: 'question', response: 'yes' }])
+  )
+
+  assert.equal(gateWith(id, SHELL_TASK_PAYLOAD).split('\n')[0], 'block')
 })
 
 test('stop-gate: a conversation node with a released item still blocks', () => {

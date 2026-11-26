@@ -14,28 +14,38 @@ export interface ProcessRow {
   command: string
 }
 
+export interface TeammateIdentity {
+  leadSessionId: string
+  label: string
+  pid: number
+}
+
 // null when the process table could not be read, which is not the same as having no lead.
 export const resolveLeadSessionId = (): string | undefined | null => {
-  const psOutput = readPsOutput('pid=,ppid=,command=')
-  return psOutput === null ? null : findLeadSessionId(parseProcessTable(psOutput), process.pid)
+  const rows = readProcessRows()
+  return rows === null ? null : findLeadSessionId(rows, process.pid)
+}
+
+// The teammate this process runs under: the nearest ancestor whose command line carries the teammate
+// flags, unless its recorded lead is `rawId` itself. undefined when there is no such ancestor or its
+// lead is `rawId`; no further ancestor is consulted. null when the process table could not be read.
+export const resolveTeammateIdentity = (rawId: string): TeammateIdentity | undefined | null => {
+  const rows = readProcessRows()
+  return rows === null ? null : findTeammateIdentity(rows, process.pid, rawId)
 }
 
 // Exported for the unit test, which hands it a process table rather than a real one.
-export const findLeadSessionId = (rows: ProcessRow[], startPid: number): string | undefined => {
-  const byPid = new Map(rows.map((row) => [row.pid, row]))
-  const visited = new Set<number>()
-  let row = byPid.get(startPid)
-  while (row !== undefined && !visited.has(row.pid)) {
-    visited.add(row.pid)
-    const lead = teammateLeadId(row.command)
-    if (lead !== undefined) {
-      return lead
-    }
+export const findLeadSessionId = (rows: ProcessRow[], startPid: number): string | undefined =>
+  findTeammateAncestor(rows, startPid)?.leadSessionId
 
-    row = byPid.get(row.ppid)
-  }
-
-  return undefined
+// Exported for the unit test.
+export const findTeammateIdentity = (
+  rows: ProcessRow[],
+  startPid: number,
+  rawId: string
+): TeammateIdentity | undefined => {
+  const ancestor = findTeammateAncestor(rows, startPid)
+  return ancestor !== undefined && ancestor.leadSessionId !== rawId ? ancestor : undefined
 }
 
 // Exported for the unit test.
@@ -49,6 +59,37 @@ export const parseProcessTable = (psOutput: string): ProcessRow[] =>
     const [, pid, ppid, command] = match
     return [{ pid: Number(pid), ppid: Number(ppid), command }]
   })
+
+const readProcessRows = (): ProcessRow[] | null => {
+  const psOutput = readPsOutput('pid=,ppid=,command=')
+  return psOutput === null ? null : parseProcessTable(psOutput)
+}
+
+// The nearest process, starting at `startPid` and walking up, whose command line names a lead.
+const findTeammateAncestor = (
+  rows: ProcessRow[],
+  startPid: number
+): TeammateIdentity | undefined => {
+  const byPid = new Map(rows.map((row) => [row.pid, row]))
+  const visited = new Set<number>()
+  let row = byPid.get(startPid)
+  while (row !== undefined && !visited.has(row.pid)) {
+    visited.add(row.pid)
+    const argv = parseTeammateArgv(row.command)
+    const lead = teammateLeadId(row.command)
+    if (argv !== undefined && lead !== undefined) {
+      return {
+        leadSessionId: lead,
+        label: argv.agentId.split('@')[0] ?? argv.agentId,
+        pid: row.pid,
+      }
+    }
+
+    row = byPid.get(row.ppid)
+  }
+
+  return undefined
+}
 
 const teammateLeadId = (command: string): string | undefined => {
   const lead = parseTeammateArgv(command)?.parentSessionId

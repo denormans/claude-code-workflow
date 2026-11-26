@@ -513,7 +513,61 @@ test('a main-loop turn start clears the background wait; a subagent turn start d
   await $.turn.start({ text: 'sub', turnId: 't2', agentId: 'agent-1' })
   await Promise.resolve()
   await Promise.resolve()
-  expect(argvs.length).toBe(2)
+  expect(argvs.length).toBe(3)
+})
+
+test('a main-loop turn start runs the board turn-start, with --interactive only for an interactive session; a subagent turn start runs nothing', async ($, on) => {
+  mock.clock(on)
+  mock.store(on)
+  const argvs: string[][] = []
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  on('session.id', () => answer('sess-1'))
+  on('process.run', ($, e) => {
+    argvs.push([...e.argv])
+    return answer({ exitCode: 0, stdout: '', stderr: '' })
+  })
+  on('turn.start', ($, e) => ({ turnId: e.turnId }))
+  const turnStarts = () => argvs.filter((argv) => argv[2] === 'turn-start')
+  const flush = async () => {
+    await Promise.resolve()
+    await Promise.resolve()
+  }
+
+  await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+  const firstBeforeMs = Date.now()
+  await $.turn.start({ text: 'hi', turnId: 't1' })
+  const firstAfterMs = Date.now()
+  await flush()
+  expect(turnStarts().length).toBe(1)
+  const [, verb, sub, startedFlag, instant, sessionFlag, sessionId, ...rest] = turnStarts()[0]!
+  expect([verb, sub, startedFlag, sessionFlag, sessionId, rest]).toEqual([
+    'session',
+    'turn-start',
+    '--started-at',
+    '--session',
+    'sess-1',
+    ['--interactive'],
+  ])
+  expect(new Date(instant!).toISOString()).toBe(instant)
+  expect(Date.parse(instant!)).toBeGreaterThanOrEqual(firstBeforeMs)
+  expect(Date.parse(instant!)).toBeLessThanOrEqual(firstAfterMs)
+
+  await $.turn.start({ text: 'sub', turnId: 't2', agentId: 'agent-1' })
+  await flush()
+  expect(turnStarts().length).toBe(1)
+
+  await $.session.start({ cwd: '/tmp', surface: null, isInteractive: false })
+  const beforeMs = Date.now()
+  await $.turn.start({ text: 'again', turnId: 't3' })
+  const afterMs = Date.now()
+  await flush()
+  expect(turnStarts().length).toBe(2)
+  const second = turnStarts()[1]!
+  expect(second.slice(2, 4)).toEqual(['turn-start', '--started-at'])
+  expect(second.slice(5)).toEqual(['--session', 'sess-1'])
+  expect(new Date(second[4]!).toISOString()).toBe(second[4])
+  expect(Date.parse(second[4]!)).toBeGreaterThanOrEqual(beforeMs)
+  expect(Date.parse(second[4]!)).toBeLessThanOrEqual(afterMs)
 })
 
 test('turn.start marks the turn start for failed-turn recovery with the turn start time', async ($, on) => {
@@ -710,5 +764,5 @@ test('a rejected turn-start clear neither fails the turn nor goes unhandled', as
   await $.turn.start({ text: 'hi', turnId: 't1' })
   await new Promise((resolve) => setTimeout(resolve, 10))
 
-  expect(clears).toBe(2)
+  expect(clears).toBe(3)
 })

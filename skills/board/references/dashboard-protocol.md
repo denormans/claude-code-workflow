@@ -501,7 +501,8 @@ user — write it to the process improvement notes and keep going; if you cannot
 asked, that is a blocker and escalates by the ordinary rules, as the stalled work, naming what
 stalls (`skills/board/references/escalation-contract.md` §Workflow improvements are notes).
 
-**A usage-limit checkpoint is a park, and parks go on the board.** When the harness injects a
+**A usage-limit checkpoint goes on the board: nothing armed fires at the usage reset, so the item
+asks the user to resume.** When the harness injects a
 `[Usage limit approaching. Checkpoint now: ...]` message, the session is about to pause with work
 unfinished. This is not a decision for the user to make — it asks them to act (wait, or resume once
 the limit resets), the same shape as the credential ask above — so it posts as an approval, not a

@@ -329,6 +329,27 @@ export const heartbeatLockAt = (path: string, label: string): void => {
   writeLock(path, { pid: process.pid, startedAt, heartbeatAt: new Date().toISOString() })
 }
 
+// Claims the lock at `path`, retrying every `pollMs` until `waitMs` has passed. false when it never
+// came free in that time.
+export const claimLockWithin = (
+  path: string,
+  label: string,
+  waitMs: number,
+  pollMs: number
+): boolean => {
+  const deadline = Date.now() + waitMs
+
+  while (!claimLock(path, label).acquired) {
+    if (Date.now() >= deadline) {
+      return false
+    }
+
+    blockingSleep(pollMs)
+  }
+
+  return true
+}
+
 export const releaseLockAt = (path: string): void => {
   const existing = readLock(path)
   if (existing && existing.pid === process.pid) {

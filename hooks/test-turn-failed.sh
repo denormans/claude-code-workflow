@@ -24,7 +24,7 @@ check() {
   fi
 }
 
-# $1 = root. The mailbox stub logs its argv, and its stdin, then
+# $1 = root. The mailbox and dashboard stubs log their argv, and their stdin; the mailbox stub
 # exits $MAILBOX_EXIT.
 make_root() {
   local root="$1"
@@ -41,7 +41,15 @@ printf 'mailbox noise\n'
 printf 'mailbox noise\n' >&2
 exit "${MAILBOX_EXIT:-0}"
 STUB
-  chmod +x "$root/bin/mailbox"
+  cat > "$root/bin/dashboard" <<'STUB'
+#!/usr/bin/env bash
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+printf 'dashboard %s\n' "$*" >> "$DIR/calls.log"
+cat >> "$DIR/calls.log"
+printf '\n' >> "$DIR/calls.log"
+exit 0
+STUB
+  chmod +x "$root/bin/mailbox" "$root/bin/dashboard"
   : > "$root/calls.log"
 }
 
@@ -74,8 +82,8 @@ PAYLOAD='{"session_id":"s1","error":"server_error","last_assistant_message":"hi"
 run_hook "$ROOT1" "$PAYLOAD"
 check "1: exit 0" "0" "$HOOK_EXIT"
 check "1: stdout and stderr are empty" "0:0" "$(bytes "$HOOK_OUT_FILE"):$(bytes "$HOOK_ERR_FILE")"
-check "1: the payload is piped to turn-failed with the session" \
-  "mailbox turn-failed --session s1"$'\n'"$PAYLOAD" \
+check "1: the payload is piped to the board's turn end, then to turn-failed, each with the session" \
+  "dashboard session turn-end --outcome failed --session s1"$'\n'"$PAYLOAD"$'\n'"mailbox turn-failed --session s1"$'\n'"$PAYLOAD" \
   "$(calls_log "$ROOT1")"
 
 # --- 2: a failing mailbox never changes the hook's result -----------------------------------------
@@ -85,8 +93,8 @@ MAILBOX_EXIT=1 run_hook "$ROOT2" "$PAYLOAD"
 check "2: exit 0 when the mailbox exits 1" "0" "$HOOK_EXIT"
 check "2: stdout and stderr are empty when the mailbox exits 1" "0:0" \
   "$(bytes "$HOOK_OUT_FILE"):$(bytes "$HOOK_ERR_FILE")"
-check "2: the failing mailbox was called" "mailbox turn-failed --session s1" \
-  "$(calls_log "$ROOT2" | head -1)"
+check "2: the failing mailbox was called" "1" \
+  "$(calls_log "$ROOT2" | grep -c '^mailbox turn-failed --session s1$')"
 
 # --- 3: no session id -> no mailbox call ----------------------------------------------------------
 ROOT3="$TMP_ROOT/c3"
@@ -102,11 +110,11 @@ ROOT4="$TMP_ROOT/c4"
 make_root "$ROOT4"
 run_hook "$ROOT4" '{"session_id":"s1","agent_id":"ae677bc6896a1469e","agent_type":"general-purpose","error":"server_error"}'
 check "4: exit 0 for a subagent failure" "0" "$HOOK_EXIT"
-check "4: no mailbox call for a payload carrying an agent_id" "" "$(calls_log "$ROOT4")"
+check "4: no mailbox or dashboard call for a payload carrying an agent_id" "" "$(calls_log "$ROOT4")"
 TEAMMATE='{"session_id":"s2","agent_type":"general-purpose","error":"server_error"}'
 run_hook "$ROOT4" "$TEAMMATE"
-check "4: a teammate payload with an agent_type and no agent_id records" \
-  "mailbox turn-failed --session s2"$'\n'"$TEAMMATE" \
+check "4: a teammate payload with an agent_type and no agent_id records on the board and the mailbox" \
+  "dashboard session turn-end --outcome failed --session s2"$'\n'"$TEAMMATE"$'\n'"mailbox turn-failed --session s2"$'\n'"$TEAMMATE" \
   "$(calls_log "$ROOT4")"
 run_hook "$ROOT4" '{"session_id":"s3","agent_id":"","error":"server_error"}'
 check "4: an empty agent_id records" "1" "$(calls_log "$ROOT4" | grep -c '^mailbox turn-failed --session s3$')"

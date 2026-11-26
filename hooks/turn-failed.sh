@@ -21,5 +21,8 @@ fi
 # agent_id, so it still records.
 [[ -n "$AGENT_ID" ]] && exit 0
 
+# The board shows the turn as failed. Swallowed like the record below.
+printf '%s' "$INPUT" | "${PLUGIN_ROOT}/bin/dashboard" session turn-end --outcome failed --session "$SESSION_ID" >/dev/null 2>&1 || true
+
 printf '%s' "$INPUT" | "${PLUGIN_ROOT}/bin/mailbox" turn-failed --session "$SESSION_ID" >/dev/null 2>&1 || true
 exit 0
